@@ -1,13 +1,11 @@
 const fs = require('fs');
 const path = require('path');
 
-// Cache em memória do catálogo SGM para evitar leitura repetida de disco a cada mensagem
-let cacheProdutos = null;
-let ultimaLeituraCache = 0;
-const TTL_CACHE_MS = 5 * 60 * 1000; // 5 minutos
+let cacheCatalogo = null;
+let cacheMtimeMs = 0;
 
 /**
- * Normaliza texto removendo acentos, pontuações e convertendo para minúsculas.
+ * Remove acentos, caracteres especiais e padroniza espaços.
  */
 function normalizarTexto(texto = '') {
   return String(texto)
@@ -20,76 +18,120 @@ function normalizarTexto(texto = '') {
 }
 
 /**
- * Carrega os produtos do catálogo SGM (JSON local ou integrado).
- * Ajuste o caminho caso seu arquivo SGM esteja em outro diretório (ex: data/produtos.json).
+ * Carrega o catálogo do ERP SGM com cache inteligente baseado na data de modificação do arquivo.
+ * Prioriza src/data/produtos.json e faz fallback para src/data/produtos_sgm.json.
  */
-function carregarCatalogoSGM() {
-  const agora = Date.now();
-  if (cacheProdutos && agora - ultimaLeituraCache < TTL_CACHE_MS) {
-    return cacheProdutos;
-  }
-
-  const caminhosPossiveis = [
+function carregarCatalogo() {
+  const caminhos = [
     path.join(__dirname, '..', 'data', 'produtos.json'),
     path.join(__dirname, '..', 'data', 'produtos_sgm.json'),
-    path.join(__dirname, '..', 'produtos.json'),
-    path.join(__dirname, '..', 'produtos_sgm.json'),
   ];
 
-  for (const caminho of caminhosPossiveis) {
+  for (const caminho of caminhos) {
     if (fs.existsSync(caminho)) {
       try {
-        const bruto = fs.readFileSync(caminho, 'utf-8');
-        const dados = JSON.parse(bruto);
-        const lista = Array.isArray(dados) ? dados : dados.produtos || dados.itens || [];
-        cacheProdutos = lista;
-        ultimaLeituraCache = agora;
-        return lista;
+        const stats = fs.statSync(caminho);
+        if (cacheCatalogo && stats.mtimeMs === cacheMtimeMs) {
+          return cacheCatalogo;
+        }
+
+        const conteudo = fs.readFileSync(caminho, 'utf-8');
+        const parsed = JSON.parse(conteudo);
+        const lista = Array.isArray(parsed)
+          ? parsed
+          : parsed.produtos || parsed.itens || parsed.data || [];
+
+        cacheCatalogo = lista.map((item, idx) => ({
+          id: item.id || item.codigo || item.CODIGO || item.cod || `SGM-${idx + 1}`,
+          codigo: String(item.codigo || item.CODIGO || item.cod || item.id || '').trim(),
+          nome: String(
+            item.descricao || item.DESCRICAO || item.nome || item.NOME || item.produto || ''
+          ).trim(),
+          preco: Number(
+            item.preco || item.PRECO || item.preco_venda || item.PRECO_VENDA || item.valor || 0
+          ),
+          unidade: String(item.unidade || item.UNIDADE || item.un || item.UN || 'KG')
+            .trim()
+            .toUpperCase(),
+          categoria: String(item.categoria || item.CATEGORIA || item.grupo || item.GRUPO || '').trim(),
+          estoque: item.estoque !== undefined ? Number(item.estoque) : null,
+        }));
+
+        cacheMtimeMs = stats.mtimeMs;
+        return cacheCatalogo;
       } catch (err) {
-        console.error(`[produtosService] Erro ao ler catálogo em ${caminho}:`, err.message);
+        console.error(`[produtosService] Falha ao ler catálogo ${caminho}:`, err.message);
       }
     }
   }
 
-  console.warn('[produtosService] Nenhum arquivo JSON de catálogo encontrado nos caminhos padrão.');
+  console.warn('[produtosService] Nenhum arquivo de catálogo SGM encontrado em src/data/.');
   return [];
 }
 
 /**
- * Extrai termos relevantes de busca a partir do texto do cliente,
- * removendo stopwords de atendimento, quantidades e unidades de medida.
+ * Sinônimos regionais de açougue e mercearia (Macaé/RJ) para expandir buscas naturais.
  */
-function extrairTermosBusca(textoCliente = '') {
+const SINONIMOS_ACOUGUE = {
+  cha: ['chã', 'coxao'],
+  coxao: ['coxao mole', 'coxao duro', 'cha de dentro', 'cha de fora'],
+  contra: ['contra file', 'contrafile'],
+  file: ['file mignon', 'contra file', 'peito frango'],
+  meio: ['meio da asa', 'tulipa'],
+  tulipa: ['meio da asa', 'tulipa'],
+  drumet: ['coxinha da asa', 'drumet'],
+  coxinha: ['coxinha da asa', 'drumet'],
+  linguica: ['linguica toscana', 'linguica frango', 'linguica pernil', 'linguica calabresa'],
+  toscana: ['linguica toscana'],
+  carvao: ['carvao vegetal'],
+  pao: ['pao de alho'],
+  alho: ['pao de alho', 'pasta de alho'],
+  moida: ['carne moida', 'acem', 'patinho', 'musculo'],
+};
+
+/**
+ * Extrai termos e bigramas relevantes do texto do cliente, descartando ruído conversacional.
+ */
+function extrairTermosDeBusca(texto = '') {
   const stopwords = new Set([
-    'oi', 'ola', 'bom', 'dia', 'boa', 'tarde', 'noite', 'tudo', 'bem',
-    'quero', 'queria', 'gostaria', 'preciso', 'ver', 'tem', 'voces', 'ai',
-    'por', 'favor', 'pfv', 'pode', 'mandar', 'manda', 'me', 've', 'uma', 'um',
-    'uns', 'umas', 'de', 'da', 'do', 'das', 'dos', 'para', 'pra', 'pro',
-    'com', 'sem', 'mais', 'menos', 'outro', 'outra', 'tambem', 'ja', 'agora',
-    'kg', 'kilo', 'kilos', 'quilo', 'quilos', 'grama', 'gramas', 'gr', 'g',
+    'oi', 'ola', 'opa', 'bom', 'dia', 'boa', 'tarde', 'noite', 'tudo', 'bem',
+    'quero', 'queria', 'gostaria', 'preciso', 'manda', 'mandar', 'pode', 'ver', 've',
+    'tem', 'voces', 'ai', 'por', 'favor', 'pfv', 'me', 'uma', 'um', 'uns', 'umas',
+    'de', 'da', 'do', 'das', 'dos', 'para', 'pra', 'pro', 'com', 'sem', 'mais', 'menos',
+    'outro', 'outra', 'tambem', 'ja', 'agora', 'hoje', 'amanha', 'quanto', 'custa', 'valor',
+    'preco', 'kg', 'kilo', 'kilos', 'quilo', 'quilos', 'grama', 'gramas', 'gr',
     'unidade', 'unidades', 'un', 'pct', 'pacote', 'bandeja', 'caixa', 'litro', 'litros',
     'corta', 'cortado', 'cortada', 'inteiro', 'inteira', 'limpo', 'limpa',
-    'moido', 'moida', 'bife', 'bifes', 'cubos', 'pedacos', 'churrasco', 'panela',
-    'rua', 'avenida', 'av', 'numero', 'bairro', 'pix', 'cartao', 'dinheiro', 'credito', 'debito',
-    'ok', 'certo', 'fechado', 'isso', 'mesmo', 'pode', 'fechar'
+    'bife', 'bifes', 'cubos', 'pedacos', 'churrasco', 'panela', 'picado', 'picada',
+    'rua', 'avenida', 'av', 'numero', 'casa', 'apto', 'apartamento', 'bloco', 'bairro',
+    'pix', 'cartao', 'dinheiro', 'credito', 'debito', 'troco', 'entrega', 'retirar',
+    'ok', 'certo', 'fechado', 'isso', 'mesmo', 'fechar', 'confirmado', 'obrigado', 'obrigada',
+    'valeu', 'show', 'beleza', 'perfeito', 'sim', 'nao', 'tira', 'tirar', 'coloca', 'colocar'
   ]);
 
-  const limpo = normalizarTexto(textoCliente);
-  const palavras = limpo
-    .split(' ')
-    .filter((p) => p.length >= 3 && !stopwords.has(p) && !/^\d+$/.test(p));
+  const limpo = normalizarTexto(texto);
+  const tokens = limpo.split(' ').filter((t) => t.length >= 2 && !/^\d+$/.test(t));
 
-  // Agrupa bigramas úteis (ex: "meio asa", "pao alho", "coracao frango", "contra file")
-  const termos = new Set(palavras);
-  const tokensOriginais = limpo.split(' ').filter((p) => p.length >= 2 && !/^\d+$/.test(p));
+  const termos = new Set();
 
-  for (let i = 0; i < tokensOriginais.length - 1; i++) {
-    const t1 = tokensOriginais[i];
-    const t2 = tokensOriginais[i + 1];
-    if (!stopwords.has(t1) || !stopwords.has(t2)) {
-      const bigrama = `${t1} ${t2}`;
-      if (bigrama.length >= 6) {
-        termos.add(bigrama);
+  for (let i = 0; i < tokens.length; i++) {
+    const t1 = tokens[i];
+    if (t1.length >= 3 && !stopwords.has(t1)) {
+      termos.add(t1);
+      if (SINONIMOS_ACOUGUE[t1]) {
+        for (const sin of SINONIMOS_ACOUGUE[t1]) {
+          termos.add(normalizarTexto(sin));
+        }
+      }
+    }
+
+    if (i < tokens.length - 1) {
+      const t2 = tokens[i + 1];
+      if ((!stopwords.has(t1) || !stopwords.has(t2)) && t1.length >= 2 && t2.length >= 2) {
+        const bigrama = `${t1} ${t2}`;
+        if (bigrama.length >= 6) {
+          termos.add(bigrama);
+        }
       }
     }
   }
@@ -98,159 +140,111 @@ function extrairTermosBusca(textoCliente = '') {
 }
 
 /**
- * Calcula relevância de um produto do catálogo SGM para um termo específico.
- * Sem pesos artificiais exclusivos que apaguem outros itens do carrinho.
+ * Pontua um produto do catálogo SGM contra um termo normalizado.
  */
-function calcularScoreProduto(produto, termoNormalizado) {
-  const nomeBruto =
-    produto.descricao ||
-    produto.nome ||
-    produto.produto ||
-    produto.DESCRICAO ||
-    produto.NOME ||
-    '';
-  const categoriaBruta = produto.categoria || produto.grupo || produto.GRUPO || '';
+function pontuarProduto(produto, termoNorm) {
+  if (!produto || !produto.nome || produto.preco <= 0) return 0;
 
-  const nomeNorm = normalizarTexto(nomeBruto);
-  const catNorm = normalizarTexto(categoriaBruta);
-
-  if (!nomeNorm) return 0;
+  const nomeNorm = normalizarTexto(produto.nome);
+  const catNorm = normalizarTexto(produto.categoria);
 
   let score = 0;
 
-  // Match exato da expressão (ex: "meio da asa", "costela", "pao de alho")
-  if (nomeNorm.includes(termoNormalizado)) {
+  if (nomeNorm === termoNorm) {
+    score += 150;
+  } else if (nomeNorm.includes(termoNorm)) {
     score += 100;
-    if (nomeNorm.startsWith(termoNormalizado)) {
-      score += 30;
+    if (nomeNorm.startsWith(termoNorm)) {
+      score += 25;
     }
   }
 
-  // Match por palavras individuais do termo
-  const partesTermo = termoNormalizado.split(' ').filter((p) => p.length >= 3);
-  let matchesParciais = 0;
+  const palavrasTermo = termoNorm.split(' ').filter((p) => p.length >= 3);
+  let hits = 0;
 
-  for (const parte of partesTermo) {
-    if (nomeNorm.includes(parte)) {
-      matchesParciais += 1;
+  for (const palavra of palavrasTermo) {
+    if (nomeNorm.includes(palavra)) {
+      hits += 1;
       score += 35;
-    } else if (catNorm.includes(parte)) {
+    } else if (catNorm.includes(palavra)) {
       score += 10;
     }
   }
 
-  // Bônus se todas as palavras do termo aparecerem no nome do produto
-  if (partesTermo.length > 1 && matchesParciais === partesTermo.length) {
-    score += 50;
-  }
-
-  // Penaliza levemente itens inativos ou sem preço válido
-  const preco = Number(produto.preco || produto.valor || produto.PRECO || produto.preco_venda || 0);
-  if (preco <= 0) {
-    score = 0;
+  if (palavrasTermo.length > 1 && hits === palavrasTermo.length) {
+    score += 45;
   }
 
   return score;
 }
 
 /**
- * Busca produtos relevantes garantindo distribuição justa entre TODOS os itens
- * mencionados na mensagem atual e no histórico recente da conversa.
- *
- * @param {string} mensagemAtual - Última mensagem enviada pelo cliente
- * @param {Array} historicoMensagens - Histórico recente da conversa [{ role, content }]
- * @param {Array} catalogoOpcional - Lista de produtos se já carregada externamente
- * @returns {Array} Lista deduplicada e balanceada de produtos do SGM
+ * Busca produtos relevantes no catálogo SGM distribuindo os slots de forma justa
+ * entre TODOS os termos pedidos na conversa (evita que um item expulse outro).
  */
-function buscarProdutosRelevantes(mensagemAtual = '', historicoMensagens = [], catalogoOpcional = null) {
-  const catalogo = Array.isArray(catalogoOpcional) && catalogoOpcional.length > 0
-    ? catalogoOpcional
-    : carregarCatalogoSGM();
+function buscarProdutosRelevantes(mensagemAtual = '', historicoConversa = []) {
+  const catalogo = carregarCatalogo();
+  if (!catalogo.length) return [];
 
-  if (!catalogo || catalogo.length === 0) {
-    return [];
-  }
-
-  // Considera a mensagem atual + últimas 8 mensagens do usuário para nunca perder itens já pedidos
-  const textosUsuario = [];
-  if (Array.isArray(historicoMensagens)) {
-    const ultimasDoUsuario = historicoMensagens
-      .filter((m) => m && (m.role === 'user' || m.remetente === 'cliente' || !m.fromMe))
-      .slice(-8)
-      .map((m) => m.content || m.texto || m.body || '');
-    textosUsuario.push(...ultimasDoUsuario);
+  const mensagensCliente = [];
+  if (Array.isArray(historicoConversa)) {
+    for (const msg of historicoConversa.slice(-10)) {
+      if (msg && (msg.role === 'user' || msg.remetente === 'cliente' || msg.fromMe === false)) {
+        const txt = msg.content || msg.texto || msg.body || '';
+        if (txt) mensagensCliente.push(txt);
+      }
+    }
   }
   if (mensagemAtual) {
-    textosUsuario.push(mensagemAtual);
+    mensagensCliente.push(mensagemAtual);
   }
 
-  const textoConsolidado = textosUsuario.join(' ');
-  const termos = extrairTermosBusca(textoConsolidado);
+  const termos = extrairTermosDeBusca(mensagensCliente.join(' '));
+  if (!termos.length) return [];
 
-  if (termos.length === 0) {
-    return [];
-  }
-
-  const maxTotalProdutos = 14;
-  // Garante slots reservados por termo para evitar que "asa" expulse "costela"
-  const slotsPorTermo = Math.max(2, Math.floor(maxTotalProdutos / Math.min(termos.length, 5)));
-
-  const selecionadosMap = new Map();
+  const LIMITE_TOTAL = 16;
+  const slotsPorTermo = Math.max(2, Math.floor(LIMITE_TOTAL / Math.min(termos.length, 6)));
+  const mapaSelecionados = new Map();
 
   for (const termo of termos) {
-    const ranqueados = catalogo
-      .map((prod) => ({
-        produto: prod,
-        score: calcularScoreProduto(prod, termo),
-      }))
-      .filter((item) => item.score >= 35)
+    const candidatos = catalogo
+      .map((prod) => ({ prod, score: pontuarProduto(prod, termo) }))
+      .filter((x) => x.score >= 35)
       .sort((a, b) => b.score - a.score)
       .slice(0, slotsPorTermo);
 
-    for (const item of ranqueados) {
-      const p = item.produto;
-      const chave = String(
-        p.codigo || p.id || p.CODIGO || p.descricao || p.nome || p.DESCRICAO
-      ).trim();
-
-      if (!selecionadosMap.has(chave)) {
-        selecionadosMap.set(chave, {
-          codigo: p.codigo || p.id || p.CODIGO || '',
-          descricao_sgm: p.descricao || p.nome || p.DESCRICAO || p.NOME || '',
-          preco: Number(p.preco || p.valor || p.PRECO || p.preco_venda || 0),
-          unidade: p.unidade || p.un || p.UNIDADE || 'KG',
-          categoria: p.categoria || p.grupo || p.GRUPO || '',
-          termo_origem: termo,
-        });
+    for (const { prod } of candidatos) {
+      const chave = prod.codigo || prod.nome;
+      if (!mapaSelecionados.has(chave)) {
+        mapaSelecionados.set(chave, prod);
       }
     }
   }
 
-  return Array.from(selecionadosMap.values()).slice(0, maxTotalProdutos);
+  return Array.from(mapaSelecionados.values()).slice(0, LIMITE_TOTAL);
 }
 
 /**
- * Formata a lista de produtos SGM para injeção limpa no prompt do modelo.
+ * Formata os produtos encontrados para injeção limpa e inequívoca no System Prompt.
  */
 function formatarCatalogoParaPrompt(produtos = []) {
   if (!produtos || produtos.length === 0) {
-    return 'NENHUM ITEM ESPECÍFICO LOCALIZADO NO CATÁLOGO SGM PARA ESTA BUSCA.';
+    return 'NENHUM PRODUTO DO CATÁLOGO SGM CORRESPONDEU EXATAMENTE AOS TERMOS DESTA MENSAGEM.';
   }
 
   return produtos
     .map((p) => {
-      const precoFormatado = Number(p.preco || 0).toFixed(2).replace('.', ',');
-      const un = String(p.unidade || 'KG').toUpperCase();
-      return `- [Cód: ${p.codigo || 'S/N'}] ${p.descricao_sgm} | Preço SGM: R$ ${precoFormatado} (${un})`;
+      const precoStr = Number(p.preco).toFixed(2).replace('.', ',');
+      const un = p.unidade === 'UN' || p.unidade === 'PCT' || p.unidade === 'CX' ? p.unidade : 'KG';
+      return `• [Cód ${p.codigo}] ${p.nome} — R$ ${precoStr} / ${un}`;
     })
     .join('\n');
 }
 
 module.exports = {
   normalizarTexto,
-  carregarCatalogoSGM,
-  extrairTermosBusca,
+  carregarCatalogo,
+  extrairTermosDeBusca,
   buscarProdutosRelevantes,
   formatarCatalogoParaPrompt,
-  sincronizarSgmComSupabase: carregarCatalogoSGM
 };
