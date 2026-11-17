@@ -1,0 +1,19 @@
+{
+  "name": "coisasdaroca-core",
+  "version": "1.0.0",
+  "description": "Microsserviço Lean Node.js para Automação Comercial do Açougue Coisas da Roça",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "nodemon src/app.js"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "cors": "^2.8.6",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "node-cron": "^3.0.3",
+    "node-firebird": "^2.21.0",
+    "pg": "^8.13.1"
+  }
+}
