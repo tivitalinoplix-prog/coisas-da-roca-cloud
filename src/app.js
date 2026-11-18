@@ -86,6 +86,12 @@ function autenticarWorkerInterno(req, res, next) {
 const mensagensEnviadasPeloBot = new Set();
 const timersDebounceLocais = new Map();
 
+let pausaGlobalMemoria = process.env.AUTOMACOES_PAUSADAS === 'true';
+
+function isAutomacaoPausadaGlobal() {
+  return pausaGlobalMemoria || process.env.AUTOMACOES_PAUSADAS === 'true';
+}
+
 const TEMPO_DEBOUNCE_MS = Number(process.env.DEBOUNCE_MS || 7000);
 const TEMPO_PAUSA_HUMANA_SEG = Number(process.env.PAUSA_HUMANA_MINUTOS || 30) * 60;
 
@@ -541,6 +547,11 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
 
     if (!normalizado) return;
 
+    if (isAutomacaoPausadaGlobal()) {
+      console.log(`[app] ⏸️ AUTOMAÇÃO PAUSADA GLOBALMENTE. Mensagem de ${normalizado.senderPhone || normalizado.from} ignorada.`);
+      return;
+    }
+
     if (normalizado.messageId) {
       const duplicada = await redisService.verificarEDeduplicarMensagem(normalizado.messageId);
       if (duplicada) return;
@@ -776,11 +787,32 @@ app.post('/api/sessao/reset', autenticarWorkerInterno, async (req, res) => {
   res.status(400).json({ error: 'Telefone obrigatório' });
 });
 
+app.get('/api/automacao/status', (req, res) => {
+  res.json({
+    pausado: isAutomacaoPausadaGlobal(),
+    motivo: process.env.AUTOMACOES_PAUSADAS === 'true' ? 'Variavel AUTOMACOES_PAUSADAS' : (pausaGlobalMemoria ? 'Pausa Manual via API' : 'Ativo'),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+app.post('/api/automacao/pausar', autenticarWorkerInterno, (req, res) => {
+  pausaGlobalMemoria = true;
+  console.log('⏸️ [app] Automação PAUSADA GLOBALMENTE via endpoint /api/automacao/pausar');
+  res.json({ ok: true, pausado: true, mensagem: 'Automação de atendimento pausada globalmente.' });
+});
+
+app.post('/api/automacao/ativar', autenticarWorkerInterno, (req, res) => {
+  pausaGlobalMemoria = false;
+  console.log('▶️ [app] Automação ATIVADA GLOBALMENTE via endpoint /api/automacao/ativar');
+  res.json({ ok: true, pausado: false, mensagem: 'Automação de atendimento ativada com sucesso.' });
+});
+
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'online',
     loja: process.env.NOME_LOJA || 'Açougue e Mercearia Coisas da Roça',
     redisConectado: redisService.isRedisConectado(),
+    automacaoPausada: isAutomacaoPausadaGlobal(),
     timestamp: new Date().toISOString(),
   });
 });
