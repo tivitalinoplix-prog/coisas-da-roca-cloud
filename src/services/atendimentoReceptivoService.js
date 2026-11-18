@@ -321,6 +321,7 @@ ESTADO ATUAL DO CARRINHO PERSISTIDO NO REDIS (NUNCA ESQUEÇA ESTES DADOS)
 ${estadoCarrinhoJson}
 
 REGRAS DO CARRINHO MULTI-TURN (TOLERÂNCIA ZERO À AMNÉSIA):
+- Se o cliente responder apenas com emojis (✅, 👍, 🥩) ou números (1, 2, 3), NUNCA trate o emoji como um produto em falta no catálogo; interprete como confirmação do pedido ou escolha da opção numerada.
 1. SEMPRE preserve os itens já listados no ESTADO ATUAL DO CARRINHO acima. Se o cliente mandar apenas o endereço ou forma de pagamento nesta mensagem, MANTENHA todos os itens intactos e mostre o resumo atualizado! dentro de bloco > *Resumo do Pedido*!
 2. PREÇO UNITÁRIO + TOTAL OBRIGATÓRIO: Em todo item listado, exiba o preço por kg/un do SGM junto ao subtotal:
    > *Resumo do Pedido*
@@ -436,7 +437,7 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
     : (sessaoOuHistorico || {});
 
   const historicoMensagens = Array.isArray(sessaoAtiva.historico) ? sessaoAtiva.historico : [];
-  const textoAtual = String(mensagemCliente || '').trim();
+  const textoAtual = String(mensagemCliente || '').trim(); const limpoAtalho = textoAtual.toLowerCase().trim(); const temItensNoCarrinho = Array.isArray(sessaoAtiva.itens) && sessaoAtiva.itens.length > 0; const temEnderecoValido = validarEnderecoEntrega(sessaoAtiva.endereco).valido; const isConfirmacaoCurta = /^(1|sim|s|ok|confirmar|confirmo|confirmado|pode fechar|fechar|fechado|pode mandar|manda|isso|isso mesmo|perfeito|certo|👍+|✅+|☑️+|✔️+|🥩+|🙏+|👏+|💯+)$/i.test(limpoAtalho); if (temItensNoCarrinho && temEnderecoValido && isConfirmacaoCurta) { const codigoPedido = String(Math.floor(100 + Math.random() * 900)); const somaItens = sessaoAtiva.itens.reduce((acc, it) => acc + (Number(it.subtotal) || 0), 0); const pgtoFinal = sessaoAtiva.forma_pagamento || perfilCliente?.forma_pagamento || 'Pix'; const listaResumo = sessaoAtiva.itens.map((it) => `• *${it.quantidade}${it.unidade} - ${it.nome}* (_${it.observacao_corte || 'Padrão'}_) — *R$ ${Number(it.subtotal).toFixed(2).replace('.', ',')}*`).join('\\n'); const msgFechamento = `Pedido confirmado e enviado para o balcão separar! 🥩\\n` + `\`Pedido #${codigoPedido}\`\\n\\n` + `> *Resumo Final*\\n` + `${listaResumo}\\n\\n` + `📍 *Entrega:* ${sessaoAtiva.endereco}\\n` + `💳 *Pagamento:* ${pgtoFinal}\\n` + `💰 *Total Estimado:* *R$ ${somaItens.toFixed(2).replace('.', ',')}*\\n` + `_O peso e valor exatos saem na balança física com o cupom antes do motoboy sair!_ 🛵`; return { resposta: msgFechamento, transbordoHumano: false, pedidoFechado: true, enviarLocalizacao: false, dadosPedido: { codigo_pedido: codigoPedido, cliente_nome: nomeCliente || sessaoAtiva.clienteNome || 'Cliente WhatsApp', endereco: sessaoAtiva.endereco, forma_pagamento: pgtoFinal, troco_para: sessaoAtiva.troco_para ?? null, total_estimado: Number(somaItens.toFixed(2)), itens: sessaoAtiva.itens }, sessaoAtualizada: { ...sessaoAtiva, forma_pagamento: pgtoFinal, etapa: 'FECHADO' }, enviarLogo: false, tipoBotoes: null, produtosConsultados: [] }; }
 
   // 1. Atalhos determinísticos (falar com balcão / pós-entrega)
   const det = detectarIntencaoDeterministica(textoAtual);
