@@ -3,10 +3,10 @@ const path = require('path');
 
 let cacheCatalogo = null;
 let cacheMtimeMs = 0;
+let cacheCaminho = '';
 
-/**
- * Remove acentos, caracteres especiais e padroniza espaços.
- */
+let cacheEmFalta = { itens: new Set(), mtimeMs: 0 };
+
 function normalizarTexto(texto = '') {
   return String(texto)
     .toLowerCase()
@@ -17,21 +17,58 @@ function normalizarTexto(texto = '') {
     .trim();
 }
 
-/**
- * Carrega o catálogo do ERP SGM com cache inteligente baseado na data de modificação do arquivo.
- * Prioriza src/data/produtos.json e faz fallback para src/data/produtos_sgm.json.
- */
-function carregarCatalogo() {
+function singularizarToken(token = '') {
+  if (!token || token.length < 4) return token;
+  if (token.endsWith('oes')) return `${token.slice(0, -3)}ao`;
+  if (token.endsWith('aes')) return `${token.slice(0, -3)}ao`;
+  if (token.endsWith('eis')) return `${token.slice(0, -3)}el`;
+  if (token.endsWith('is') && token.length > 4) return `${token.slice(0, -2)}l`;
+  if (token.endsWith('s') && !token.endsWith('ss')) return token.slice(0, -1);
+  return token;
+}
+
+function carregarProdutosEmFalta() {
   const caminhos = [
-    path.join(__dirname, '..', 'data', 'produtos.json'),
-    path.join(__dirname, '..', 'data', 'produtos_sgm.json'),
+    path.join(__dirname, '..', '..', 'config', 'produtos_em_falta.json'),
+    path.join(__dirname, '..', '..', '..', 'config', 'produtos_em_falta.json'),
   ];
 
   for (const caminho of caminhos) {
     if (fs.existsSync(caminho)) {
       try {
         const stats = fs.statSync(caminho);
-        if (cacheCatalogo && stats.mtimeMs === cacheMtimeMs) {
+        if (stats.mtimeMs === cacheEmFalta.mtimeMs) {
+          return cacheEmFalta.itens;
+        }
+        const parsed = JSON.parse(fs.readFileSync(caminho, 'utf-8'));
+        const lista = Array.isArray(parsed?.itens) ? parsed.itens : [];
+        cacheEmFalta = {
+          itens: new Set(lista.map((x) => normalizarTexto(x)).filter(Boolean)),
+          mtimeMs: stats.mtimeMs,
+        };
+        return cacheEmFalta.itens;
+      } catch (err) {
+        console.warn('[produtosService] Falha ao ler produtos_em_falta.json:', err.message);
+      }
+    }
+  }
+
+  return new Set();
+}
+
+function carregarCatalogo(forcarRecarga = false) {
+  const caminhos = [
+    path.join(__dirname, '..', 'data', 'produtos.json'),
+    path.join(__dirname, '..', 'data', 'produtos_sgm.json'),
+    path.join(__dirname, '..', '..', 'data', 'produtos.json'),
+    path.join(__dirname, '..', '..', 'data', 'produtos_sgm.json'),
+  ];
+
+  for (const caminho of caminhos) {
+    if (fs.existsSync(caminho)) {
+      try {
+        const stats = fs.statSync(caminho);
+        if (!forcarRecarga && cacheCatalogo && stats.mtimeMs === cacheMtimeMs && cacheCaminho === caminho) {
           return cacheCatalogo;
         }
 
@@ -58,6 +95,7 @@ function carregarCatalogo() {
         }));
 
         cacheMtimeMs = stats.mtimeMs;
+        cacheCaminho = caminho;
         return cacheCatalogo;
       } catch (err) {
         console.error(`[produtosService] Falha ao ler catálogo ${caminho}:`, err.message);
@@ -65,83 +103,78 @@ function carregarCatalogo() {
     }
   }
 
-  console.warn('[produtosService] Nenhum arquivo de catálogo SGM encontrado em src/data/.');
+  console.warn('[produtosService] Nenhum arquivo de catálogo SGM encontrado.');
   return [];
 }
 
-/**
- * Sinônimos regionais de açougue e mercearia (Macaé/RJ) para expandir buscas naturais.
- */
 const SINONIMOS_ACOUGUE = {
-  cha: ['chã', 'coxao'],
-  coxao: ['coxao mole', 'coxao duro', 'cha de dentro', 'cha de fora'],
+  cha: ['coxao mole', 'coxao duro'],
+  coxao: ['coxao mole', 'coxao duro'],
   contra: ['contra file', 'contrafile'],
-  file: ['file mignon', 'contra file', 'peito frango'],
-  meio: ['meio da asa', 'tulipa'],
-  tulipa: ['meio da asa', 'tulipa'],
+  contrafile: ['contra file'],
+  tulipa: ['meio da asa'],
   drumet: ['coxinha da asa', 'drumet'],
-  coxinha: ['coxinha da asa', 'drumet'],
-  linguica: ['linguica toscana', 'linguica frango', 'linguica pernil', 'linguica calabresa'],
   toscana: ['linguica toscana'],
   carvao: ['carvao vegetal'],
-  pao: ['pao de alho'],
   alho: ['pao de alho', 'pasta de alho'],
   moida: ['carne moida', 'acem', 'patinho', 'musculo'],
+  moido: ['carne moida', 'acem', 'patinho', 'musculo'],
+  refri: ['refrigerante', 'coca cola', 'guarana'],
+  coca: ['coca cola'],
 };
 
-/**
- * Extrai termos e bigramas relevantes do texto do cliente, descartando ruído conversacional.
- */
+const STOPWORDS = new Set([
+  'oi', 'ola', 'opa', 'bom', 'dia', 'boa', 'tarde', 'noite', 'tudo', 'bem',
+  'quero', 'queria', 'gostaria', 'preciso', 'manda', 'mandar', 'pode', 'ver', 've',
+  'tem', 'voces', 'ai', 'por', 'favor', 'pfv', 'me', 'uma', 'um', 'uns', 'umas',
+  'de', 'da', 'do', 'das', 'dos', 'para', 'pra', 'pro', 'com', 'sem', 'mais', 'menos',
+  'outro', 'outra', 'tambem', 'ja', 'agora', 'hoje', 'amanha', 'quanto', 'custa', 'valor',
+  'preco', 'kg', 'kilo', 'kilos', 'quilo', 'quilos', 'grama', 'gramas', 'gr',
+  'unidade', 'unidades', 'un', 'pct', 'pacote', 'bandeja', 'caixa', 'litro', 'litros',
+  'corta', 'cortado', 'cortada', 'inteiro', 'inteira', 'limpo', 'limpa',
+  'bife', 'bifes', 'cubos', 'pedacos', 'churrasco', 'panela', 'picado', 'picada',
+  'rua', 'avenida', 'av', 'numero', 'casa', 'apto', 'apartamento', 'bloco', 'bairro',
+  'pix', 'cartao', 'dinheiro', 'credito', 'debito', 'troco', 'entrega', 'retirar',
+  'ok', 'certo', 'fechado', 'isso', 'mesmo', 'fechar', 'confirmado', 'obrigado', 'obrigada',
+  'valeu', 'show', 'beleza', 'perfeito', 'sim', 'nao', 'tira', 'tirar', 'coloca', 'colocar',
+  'audio', 'cliente', 'pedido', 'resumo', 'total', 'subtotal', 'estimado', 'aproximado',
+  'balanca', 'cupom', 'separar', 'anotei', 'anotado', 'mantemos', 'pagamento', 'endereco',
+]);
+
 function extrairTermosDeBusca(texto = '') {
-  const stopwords = new Set([
-    'oi', 'ola', 'opa', 'bom', 'dia', 'boa', 'tarde', 'noite', 'tudo', 'bem',
-    'quero', 'queria', 'gostaria', 'preciso', 'manda', 'mandar', 'pode', 'ver', 've',
-    'tem', 'voces', 'ai', 'por', 'favor', 'pfv', 'me', 'uma', 'um', 'uns', 'umas',
-    'de', 'da', 'do', 'das', 'dos', 'para', 'pra', 'pro', 'com', 'sem', 'mais', 'menos',
-    'outro', 'outra', 'tambem', 'ja', 'agora', 'hoje', 'amanha', 'quanto', 'custa', 'valor',
-    'preco', 'kg', 'kilo', 'kilos', 'quilo', 'quilos', 'grama', 'gramas', 'gr',
-    'unidade', 'unidades', 'un', 'pct', 'pacote', 'bandeja', 'caixa', 'litro', 'litros',
-    'corta', 'cortado', 'cortada', 'inteiro', 'inteira', 'limpo', 'limpa',
-    'bife', 'bifes', 'cubos', 'pedacos', 'churrasco', 'panela', 'picado', 'picada',
-    'rua', 'avenida', 'av', 'numero', 'casa', 'apto', 'apartamento', 'bloco', 'bairro',
-    'pix', 'cartao', 'dinheiro', 'credito', 'debito', 'troco', 'entrega', 'retirar',
-    'ok', 'certo', 'fechado', 'isso', 'mesmo', 'fechar', 'confirmado', 'obrigado', 'obrigada',
-    'valeu', 'show', 'beleza', 'perfeito', 'sim', 'nao', 'tira', 'tirar', 'coloca', 'colocar'
-  ]);
-
   const limpo = normalizarTexto(texto);
-  const tokens = limpo.split(' ').filter((t) => t.length >= 2 && !/^\d+$/.test(t));
+  const rawTokens = limpo.split(' ').filter((t) => t.length >= 2 && !/^\d+$/.test(t));
 
-  const termos = new Set();
+  const bigramas = [];
+  const unigramas = [];
+  const extras = [];
 
-  for (let i = 0; i < tokens.length; i++) {
-    const t1 = tokens[i];
-    if (t1.length >= 3 && !stopwords.has(t1)) {
-      termos.add(t1);
-      if (SINONIMOS_ACOUGUE[t1]) {
-        for (const sin of SINONIMOS_ACOUGUE[t1]) {
-          termos.add(normalizarTexto(sin));
+  for (let i = 0; i < rawTokens.length; i++) {
+    const t1 = singularizarToken(rawTokens[i]);
+
+    if (i < rawTokens.length - 1) {
+      const t2 = singularizarToken(rawTokens[i + 1]);
+      if (!STOPWORDS.has(t1) && !STOPWORDS.has(t2) && t1.length >= 2 && t2.length >= 2) {
+        const bigrama = `${t1} ${t2}`;
+        if (bigrama.length >= 5) {
+          bigramas.push(bigrama);
         }
       }
     }
 
-    if (i < tokens.length - 1) {
-      const t2 = tokens[i + 1];
-      if ((!stopwords.has(t1) || !stopwords.has(t2)) && t1.length >= 2 && t2.length >= 2) {
-        const bigrama = `${t1} ${t2}`;
-        if (bigrama.length >= 6) {
-          termos.add(bigrama);
+    if (t1.length >= 3 && !STOPWORDS.has(t1)) {
+      unigramas.push(t1);
+      if (SINONIMOS_ACOUGUE[t1]) {
+        for (const sin of SINONIMOS_ACOUGUE[t1]) {
+          extras.push(normalizarTexto(sin));
         }
       }
     }
   }
 
-  return Array.from(termos);
+  return Array.from(new Set([...bigramas, ...unigramas, ...extras]));
 }
 
-/**
- * Pontua um produto do catálogo SGM contra um termo normalizado.
- */
 function pontuarProduto(produto, termoNorm) {
   if (!produto || !produto.nome || produto.preco <= 0) return 0;
 
@@ -151,11 +184,11 @@ function pontuarProduto(produto, termoNorm) {
   let score = 0;
 
   if (nomeNorm === termoNorm) {
-    score += 150;
+    score += 180;
   } else if (nomeNorm.includes(termoNorm)) {
-    score += 100;
+    score += 110;
     if (nomeNorm.startsWith(termoNorm)) {
-      score += 25;
+      score += 30;
     }
   }
 
@@ -163,50 +196,33 @@ function pontuarProduto(produto, termoNorm) {
   let hits = 0;
 
   for (const palavra of palavrasTermo) {
-    if (nomeNorm.includes(palavra)) {
+    const regexPalavra = new RegExp(`\\b${palavra}`);
+    if (regexPalavra.test(nomeNorm)) {
       hits += 1;
-      score += 35;
+      score += 40;
+    } else if (nomeNorm.includes(palavra)) {
+      hits += 1;
+      score += 28;
     } else if (catNorm.includes(palavra)) {
       score += 10;
     }
   }
 
   if (palavrasTermo.length > 1 && hits === palavrasTermo.length) {
-    score += 45;
+    score += 55;
   }
 
   return score;
 }
 
-/**
- * Busca produtos relevantes no catálogo SGM distribuindo os slots de forma justa
- * entre TODOS os termos pedidos na conversa (evita que um item expulse outro).
- */
-function buscarProdutosRelevantes(mensagemAtual = '', historicoConversa = []) {
-  const catalogo = carregarCatalogo();
-  if (!catalogo.length) return [];
+function coletarCandidatosPorTermos(catalogo, termos, limiteSlots, mapaDestino) {
+  if (!termos.length || limiteSlots <= 0) return;
 
-  const mensagensCliente = [];
-  if (Array.isArray(historicoConversa)) {
-    for (const msg of historicoConversa.slice(-10)) {
-      if (msg && (msg.role === 'user' || msg.remetente === 'cliente' || msg.fromMe === false)) {
-        const txt = msg.content || msg.texto || msg.body || '';
-        if (txt) mensagensCliente.push(txt);
-      }
-    }
-  }
-  if (mensagemAtual) {
-    mensagensCliente.push(mensagemAtual);
-  }
-
-  const termos = extrairTermosDeBusca(mensagensCliente.join(' '));
-  if (!termos.length) return [];
-
-  const LIMITE_TOTAL = 16;
-  const slotsPorTermo = Math.max(2, Math.floor(LIMITE_TOTAL / Math.min(termos.length, 6)));
-  const mapaSelecionados = new Map();
+  const slotsPorTermo = Math.max(2, Math.floor(limiteSlots / Math.min(termos.length, 5)));
 
   for (const termo of termos) {
+    if (mapaDestino.size >= 22) break;
+
     const candidatos = catalogo
       .map((prod) => ({ prod, score: pontuarProduto(prod, termo) }))
       .filter((x) => x.score >= 35)
@@ -215,36 +231,68 @@ function buscarProdutosRelevantes(mensagemAtual = '', historicoConversa = []) {
 
     for (const { prod } of candidatos) {
       const chave = prod.codigo || prod.nome;
-      if (!mapaSelecionados.has(chave)) {
-        mapaSelecionados.set(chave, prod);
+      if (!mapaDestino.has(chave)) {
+        mapaDestino.set(chave, prod);
       }
     }
   }
-
-  return Array.from(mapaSelecionados.values()).slice(0, LIMITE_TOTAL);
 }
 
-/**
- * Formata os produtos encontrados para injeção limpa e inequívoca no System Prompt.
- */
+function buscarProdutosRelevantes(mensagemAtual = '', historicoConversa = []) {
+  const catalogo = carregarCatalogo();
+  if (!catalogo.length) return [];
+
+  const termosAtuais = extrairTermosDeBusca(mensagemAtual);
+
+  const textosHistorico = [];
+  if (Array.isArray(historicoConversa)) {
+    for (const msg of historicoConversa.slice(-14)) {
+      const txt = msg?.content || msg?.texto || msg?.body || '';
+      if (txt) textosHistorico.push(txt);
+    }
+  }
+  const termosHistorico = extrairTermosDeBusca(textosHistorico.join(' ')).filter(
+    (t) => !termosAtuais.includes(t)
+  );
+
+  const mapaSelecionados = new Map();
+
+  coletarCandidatosPorTermos(catalogo, termosAtuais, 12, mapaSelecionados);
+  coletarCandidatosPorTermos(catalogo, termosHistorico, 10, mapaSelecionados);
+
+  return Array.from(mapaSelecionados.values()).slice(0, 22);
+}
+
 function formatarCatalogoParaPrompt(produtos = []) {
   if (!produtos || produtos.length === 0) {
     return 'NENHUM PRODUTO DO CATÁLOGO SGM CORRESPONDEU EXATAMENTE AOS TERMOS DESTA MENSAGEM.';
   }
 
+  const emFalta = carregarProdutosEmFalta();
+
   return produtos
     .map((p) => {
       const precoStr = Number(p.preco).toFixed(2).replace('.', ',');
       const un = p.unidade === 'UN' || p.unidade === 'PCT' || p.unidade === 'CX' ? p.unidade : 'KG';
-      return `• [Cód ${p.codigo}] ${p.nome} — R$ ${precoStr} / ${un}`;
+      const nomeNorm = normalizarTexto(p.nome);
+      const emFaltaHoje = Array.from(emFalta).some((itemFalta) => nomeNorm.includes(itemFalta));
+      const tagFalta = emFaltaHoje ? ' [AVISO: ITEM EM FALTA NO BALCÃO HOJE]' : '';
+      return `• [Cód ${p.codigo}] ${p.nome} — R$ ${precoStr} / ${un}${tagFalta}`;
     })
     .join('\n');
+}
+
+async function sincronizarSgmComSupabase() {
+  const lista = carregarCatalogo(true);
+  return { ok: true, totalProdutos: lista.length };
 }
 
 module.exports = {
   normalizarTexto,
   carregarCatalogo,
+  carregarProdutosEmFalta,
   extrairTermosDeBusca,
   buscarProdutosRelevantes,
   formatarCatalogoParaPrompt,
+  sincronizarSgmComSupabase,
 };

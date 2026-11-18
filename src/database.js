@@ -1,3 +1,9 @@
+/**
+ * CAMADA DE PERSISTÊNCIA E POOL DE CONEXÕES SUPABASE (POSTGRESQL)
+ * Configurado para alta resiliência em Arquitetura Frugal Node.js
+ * Suporta Pooler Supabase (porta 6543 Transaction / 5432 Session)
+ */
+
 require('dotenv').config();
 const { Pool } = require('pg');
 
@@ -12,6 +18,7 @@ const pool = new Pool({
   keepAliveInitialDelayMillis: 10000
 });
 
+// Impede que quedas momentâneas de rede com o Supabase derrubem o processo Node.js
 pool.on('error', (err) => {
   console.error('⚠️ [PostgreSQL Pool] Erro inesperado em cliente ocioso:', err.message);
 });

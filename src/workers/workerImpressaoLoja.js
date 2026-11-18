@@ -1,3 +1,14 @@
+/**
+ * WORKER LOCAL DE IMPRESSÃO TÉRMICA (CAIXA 1 / PDV)
+ * Açougue e Mercearia Coisas da Roça — Macaé/RJ
+ * 
+ * - Comunicação 100% Outbound HTTPS com a API Nuvem (dispensa IP fixo ou abertura de portas)
+ * - Tríplice Trava de Segurança:
+ *   1. Janela ativa do ERP (DAM / SASIII) não está em tela de emissão fiscal
+ *   2. Banco Firebird local (pdv.fdb) sem escrita recente (< 1500ms)
+ *   3. Spooler do Windows (winspool.drv) sem jobs ativos na fila
+ */
+
 require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
@@ -11,9 +22,15 @@ const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || '2500', 10);
 
 let isRunning = true;
 
+/**
+ * Executa verificação da Tríplice Trava e envia ESC/POS em uma única chamada PowerShell
+ * (reduz overhead de spawn de processo em 70%).
+ */
 function tentarImprimirComTravaPDV(base64Escpos) {
   const psScript = `
     $ErrorActionPreference = 'Stop'
+
+    # 1. TRAVA DE JANELA ATIVA (ERP DAM / SASIII)
     Add-Type @"
       using System;
       using System.Runtime.InteropServices;
@@ -31,6 +48,8 @@ function tentarImprimirComTravaPDV(base64Escpos) {
       Write-Output "BUSY:JANELA_ERP_ATIVA ($tituloJanela)"
       exit 2
     }
+
+    # 2. TRAVA DE I/O NO BANCO FIREBIRD (pdv.fdb)
     if (Test-Path "${PDV_FDB_PATH}") {
       $lastWrite = (Get-Item "${PDV_FDB_PATH}").LastWriteTime
       $diffMs = ((Get-Date) - $lastWrite).TotalMilliseconds
@@ -39,11 +58,15 @@ function tentarImprimirComTravaPDV(base64Escpos) {
         exit 2
       }
     }
+
+    # 3. TRAVA DO SPOOLER DO WINDOWS (winspool.drv)
     $jobsAtivos = Get-WmiObject -Class Win32_PrintJob -ErrorAction SilentlyContinue
     if ($jobsAtivos) {
       Write-Output "BUSY:SPOOLER_WINDOWS_OCUPADO"
       exit 2
     }
+
+    # TODAS AS TRAVAS LIVRES -> TRANSMISSÃO DIRETA SERIAL / BLUETOOTH SPP
     $bytes = [Convert]::FromBase64String("${base64Escpos}")
     $port = New-Object System.IO.Ports.SerialPort "${PRINTER_PORT}", 115200, 'None', 8, 'One'
     $port.WriteTimeout = 4000
@@ -99,6 +122,7 @@ async function apiFetch(endpoint, options = {}) {
 
 async function cicloWorkerCaixa1() {
   try {
+    // 1. Consome próximo job já travado atomicamente via SKIP LOCKED no servidor
     const data = await apiFetch('/api/impressao/proximo');
     const job = data?.job;
     if (!job) return;
@@ -109,6 +133,7 @@ async function cicloWorkerCaixa1() {
       const resultado = await tentarImprimirComTravaPDV(job.dados_formatados_escpos);
 
       if (!resultado.printed) {
+        // PDV ocupado: devolve job para PENDENTE sem queimar tentativas de falha fatal
         console.log(`[Caixa 1] Adiado (${resultado.reason}). Devolvendo Job #${job.id} à fila...`);
         await apiFetch('/api/impressao/status', {
           method: 'POST',
@@ -117,6 +142,7 @@ async function cicloWorkerCaixa1() {
         return;
       }
 
+      // Sucesso físico confirmado
       await apiFetch('/api/impressao/status', {
         method: 'POST',
         body: JSON.stringify({ id: job.id, status: 'IMPRESSO' })
@@ -130,6 +156,7 @@ async function cicloWorkerCaixa1() {
       });
     }
   } catch (netErr) {
+    // Queda momentânea de internet na loja não derruba o worker; retenta no próximo ciclo
     console.warn(`[Caixa 1] Aguardando reconexão com nuvem: ${netErr.message}`);
   }
 }

@@ -1,3 +1,7 @@
+/**
+ * Decodificador de Etiquetas Toledo Prix 4 (Padrão C23 / MGV5)
+ * Padrão: 2 + CCCCC (PLU 5 dígitos) + TTTTT (Total R$ centavos 5 dígitos) + D (Dígito Verificador)
+ */
 function decodificarEtiquetaC23(barcode, precoKg = null) {
   if (!barcode || typeof barcode !== 'string') {
     return { valido: false, erro: 'Código de barras ausente' };
