@@ -89,6 +89,11 @@ const timersDebounceLocais = new Map();
 const TEMPO_DEBOUNCE_MS = Number(process.env.DEBOUNCE_MS || 7000);
 const TEMPO_PAUSA_HUMANA_SEG = Number(process.env.PAUSA_HUMANA_MINUTOS || 30) * 60;
 
+function isNumeroTestador(chave = '') {
+  const cleanPhone = String(chave || '').replace(/\D/g, '');
+  return cleanPhone.includes('998586180') || cleanPhone.includes('173679971422247');
+}
+
 function isMensagemFornecedorOuRobo(texto = '', pushName = '') {
   const txt = String(texto || '').toLowerCase();
   const nome = String(pushName || '').toLowerCase();
@@ -403,11 +408,15 @@ async function executarTurnoConsolidado(chaveCanonica) {
 
     if (resultado.enviarLogo && logoBase64 && whatsappAdapter?.enviarImagemUniversal) {
       registrarEnvioBot(chaveCanonica, resultado.resposta);
-      await whatsappAdapter.enviarImagemUniversal(destinoEnvio, logoBase64, resultado.resposta);
+      const envioImg = await whatsappAdapter.enviarImagemUniversal(destinoEnvio, logoBase64, resultado.resposta);
+      const sentImgId = envioImg?.messageId || envioImg?.key?.id || envioImg?.id || envioImg?.data?.messageId || null;
+      if (sentImgId) {
+        registrarEnvioBot(chaveCanonica, null, sentImgId);
+      }
     } else if (resultado.resposta) {
       registrarEnvioBot(chaveCanonica, resultado.resposta);
       const envioRes = await enviarMensagemWhatsApp(destinoEnvio, resultado.resposta, resultado.tipoBotoes);
-      const sentMsgId = envioRes?.messageId || envioRes?.key?.id || envioRes?.id || null;
+      const sentMsgId = envioRes?.messageId || envioRes?.key?.id || envioRes?.id || envioRes?.data?.messageId || null;
       if (sentMsgId) {
         registrarEnvioBot(chaveCanonica, null, sentMsgId);
       }
@@ -575,6 +584,11 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
         return;
       }
 
+      if (isNumeroTestador(chaveCanonica) || isNumeroTestador(telefoneReal)) {
+        console.log(`[app] Mensagem do próprio testador/loja detectada para ${chaveCanonica}, imunidade total de pausa mantida.`);
+        return;
+      }
+
       await redisService.ativarPausa(chaveCanonica, TEMPO_PAUSA_HUMANA_SEG);
       console.log(`[app] Intervenção humana detectada para ${chaveCanonica}. Bot pausado por 30 min.`);
       return;
@@ -712,6 +726,24 @@ app.post('/api/conversa/despausar', autenticarWorkerInterno, async (req, res) =>
     await redisService.removerPausa(limpo);
     await redisService.removerPausa(limpo.replace(/\D/g, ''));
     return res.json({ ok: true, mensagem: `Conversa ${limpo} despausada com sucesso.` });
+  }
+  res.status(400).json({ error: 'Telefone obrigatório' });
+});
+
+app.post('/api/sessao/reset', autenticarWorkerInterno, async (req, res) => {
+  const { telefone } = req.body || {};
+  if (telefone) {
+    const limpo = String(telefone).trim();
+    const cleanDigits = limpo.replace(/\D/g, '');
+    await redisService.limparSessao(limpo);
+    if (cleanDigits && cleanDigits !== limpo) {
+      await redisService.limparSessao(cleanDigits);
+    }
+    await redisService.removerPausa(limpo);
+    if (cleanDigits && cleanDigits !== limpo) {
+      await redisService.removerPausa(cleanDigits);
+    }
+    return res.json({ ok: true, mensagem: `Sessão e pausa de ${limpo} resetadas com sucesso.` });
   }
   res.status(400).json({ error: 'Telefone obrigatório' });
 });

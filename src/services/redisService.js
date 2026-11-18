@@ -211,13 +211,14 @@ async function consumirBufferMensagens(chave) {
   memBuffers.delete(key);
   return local;
 }
-function isTestadorImune(chave = '') {
-  const s = String(chave || '').toLowerCase();
-  return s.includes('998586180') || s.includes('173679971422247');
+
+function isNumeroTestador(chave = '') {
+  const cleanPhone = String(chave || '').replace(/\D/g, '');
+  return cleanPhone.includes('998586180') || cleanPhone.includes('173679971422247');
 }
 
 async function ativarPausa(chave, segundos = TTL_PAUSA_PADRAO_SEG) {
-  if (!chave || isTestadorImune(chave)) return;
+  if (!chave || isNumeroTestador(chave)) return;
   const key = `pausa:${chave}`;
   const ttl = Math.max(60, Number(segundos) || TTL_PAUSA_PADRAO_SEG);
 
@@ -233,7 +234,7 @@ async function ativarPausa(chave, segundos = TTL_PAUSA_PADRAO_SEG) {
 }
 
 async function estaEmPausa(chave) {
-  if (!chave || isTestadorImune(chave)) return false;
+  if (!chave || isNumeroTestador(chave)) return false;
   const key = `pausa:${chave}`;
 
   if (isRedisConectado()) {
@@ -510,7 +511,6 @@ module.exports = {
   adicionarBufferMensagem,
   consumirBufferMensagens,
   ativarPausa,
-  isTestadorImune,
   estaEmPausa,
   removerPausa,
   verificarEDeduplicarMensagem,
@@ -526,4 +526,5 @@ module.exports = {
   buscarPedidoAguardandoPesagem,
   salvarMapeamentoLid,
   obterTelefonePorLid,
+  isNumeroTestador,
 };

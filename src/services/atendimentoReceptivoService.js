@@ -436,8 +436,77 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
     ? { historico: sessaoOuHistorico, itens: [], boasVindasEnviada: sessaoOuHistorico.length > 0 }
     : (sessaoOuHistorico || {});
 
-  const historicoMensagens = Array.isArray(sessaoAtiva.historico) ? sessaoAtiva.historico : [];
-  const textoAtual = String(mensagemCliente || '').trim(); const limpoAtalho = textoAtual.toLowerCase().trim(); const temItensNoCarrinho = Array.isArray(sessaoAtiva.itens) && sessaoAtiva.itens.length > 0; const temEnderecoValido = validarEnderecoEntrega(sessaoAtiva.endereco).valido; const isConfirmacaoCurta = /^(1|sim|s|ok|confirmar|confirmo|confirmado|pode fechar|fechar|fechado|pode mandar|manda|isso|isso mesmo|perfeito|certo|👍+|✅+|☑️+|✔️+|🥩+|🙏+|👏+|💯+)$/i.test(limpoAtalho); if (temItensNoCarrinho && temEnderecoValido && isConfirmacaoCurta) { const codigoPedido = String(Math.floor(100 + Math.random() * 900)); const somaItens = sessaoAtiva.itens.reduce((acc, it) => acc + (Number(it.subtotal) || 0), 0); const pgtoFinal = sessaoAtiva.forma_pagamento || perfilCliente?.forma_pagamento || 'Pix'; const listaResumo = sessaoAtiva.itens.map((it) => `• *${it.quantidade}${it.unidade} - ${it.nome}* (_${it.observacao_corte || 'Padrão'}_) — *R$ ${Number(it.subtotal).toFixed(2).replace('.', ',')}*`).join('\\n'); const msgFechamento = `Pedido confirmado e enviado para o balcão separar! 🥩\\n` + `\`Pedido #${codigoPedido}\`\\n\\n` + `> *Resumo Final*\\n` + `${listaResumo}\\n\\n` + `📍 *Entrega:* ${sessaoAtiva.endereco}\\n` + `💳 *Pagamento:* ${pgtoFinal}\\n` + `💰 *Total Estimado:* *R$ ${somaItens.toFixed(2).replace('.', ',')}*\\n` + `_O peso e valor exatos saem na balança física com o cupom antes do motoboy sair!_ 🛵`; return { resposta: msgFechamento, transbordoHumano: false, pedidoFechado: true, enviarLocalizacao: false, dadosPedido: { codigo_pedido: codigoPedido, cliente_nome: nomeCliente || sessaoAtiva.clienteNome || 'Cliente WhatsApp', endereco: sessaoAtiva.endereco, forma_pagamento: pgtoFinal, troco_para: sessaoAtiva.troco_para ?? null, total_estimado: Number(somaItens.toFixed(2)), itens: sessaoAtiva.itens }, sessaoAtualizada: { ...sessaoAtiva, forma_pagamento: pgtoFinal, etapa: 'FECHADO' }, enviarLogo: false, tipoBotoes: null, produtosConsultados: [] }; }
+  let historicoMensagens = Array.isArray(sessaoAtiva.historico) ? [...sessaoAtiva.historico] : [];
+  const textoAtual = String(mensagemCliente || '').trim();
+
+  // Reset de sessão por inatividade (> 2 horas)
+  const DUAS_HORAS_MS = 2 * 60 * 60 * 1000;
+  const agora = Date.now();
+  let ultimaMsgTimestamp = null;
+
+  if (historicoMensagens.length > 0) {
+    const ultimaMsg = historicoMensagens[historicoMensagens.length - 1];
+    if (ultimaMsg?.timestamp) {
+      ultimaMsgTimestamp = Number(ultimaMsg.timestamp);
+    }
+  }
+
+  if (!ultimaMsgTimestamp && sessaoAtiva.atualizadoEm) {
+    const t = new Date(sessaoAtiva.atualizadoEm).getTime();
+    if (!Number.isNaN(t)) {
+      ultimaMsgTimestamp = t;
+    }
+  }
+
+  if (ultimaMsgTimestamp && (agora - ultimaMsgTimestamp > DUAS_HORAS_MS)) {
+    console.log(`[atendimentoReceptivoService] Sessão inativa há mais de 2 horas. Resetando boas-vindas e histórico.`);
+    sessaoAtiva.boasVindasEnviada = false;
+    sessaoAtiva.historico = [];
+    sessaoAtiva.itens = [];
+    sessaoAtiva.etapa = 'INICIO';
+    historicoMensagens = [];
+  }
+
+  // Atalho determinístico de confirmação de pedido (emojis ou número 1)
+  const limpoAtalho = textoAtual.toLowerCase().trim();
+  const temItensNoCarrinho = Array.isArray(sessaoAtiva.itens) && sessaoAtiva.itens.length > 0;
+  const temEnderecoValido = validarEnderecoEntrega(sessaoAtiva.endereco).valido;
+  const isConfirmacaoCurta = /^(1|sim|s|ok|confirmar|confirmo|confirmado|pode fechar|fechar|fechado|pode mandar|manda|isso|isso mesmo|perfeito|certo|👍+|✅+|☑️+|✔️+|🥩+|🙏+|👏+|💯+)$/i.test(limpoAtalho);
+
+  if (temItensNoCarrinho && temEnderecoValido && isConfirmacaoCurta) {
+    const codigoPedido = String(Math.floor(100 + Math.random() * 900));
+    const somaItens = sessaoAtiva.itens.reduce((acc, it) => acc + (Number(it.subtotal) || 0), 0);
+    const pgtoFinal = sessaoAtiva.forma_pagamento || perfilCliente?.forma_pagamento || 'Pix';
+    const listaResumo = sessaoAtiva.itens.map((it) => `• *${it.quantidade}${it.unidade} - ${it.nome}* (_${it.observacao_corte || 'Padrão'}_) — *R$ ${Number(it.subtotal).toFixed(2).replace('.', ',')}*`).join('\n');
+    const msgFechamento = `Pedido confirmado e enviado para o balcão separar! 🥩\n` +
+      `\`Pedido #${codigoPedido}\`\n\n` +
+      `> *Resumo Final*\n` +
+      `${listaResumo}\n\n` +
+      `📍 *Entrega:* ${sessaoAtiva.endereco}\n` +
+      `💳 *Pagamento:* ${pgtoFinal}\n` +
+      `💰 *Total Estimado:* *R$ ${somaItens.toFixed(2).replace('.', ',')}*\n` +
+      `_O peso e valor exatos saem na balança física com o cupom antes do motoboy sair!_ 🛵`;
+
+    return {
+      resposta: msgFechamento,
+      transbordoHumano: false,
+      pedidoFechado: true,
+      enviarLocalizacao: false,
+      dadosPedido: {
+        codigo_pedido: codigoPedido,
+        cliente_nome: nomeCliente || sessaoAtiva.clienteNome || 'Cliente WhatsApp',
+        endereco: sessaoAtiva.endereco,
+        forma_pagamento: pgtoFinal,
+        troco_para: sessaoAtiva.troco_para ?? null,
+        total_estimado: Number(somaItens.toFixed(2)),
+        itens: sessaoAtiva.itens,
+      },
+      sessaoAtualizada: { ...sessaoAtiva, forma_pagamento: pgtoFinal, etapa: 'FECHADO', boasVindasEnviada: true },
+      enviarLogo: false,
+      tipoBotoes: null,
+      produtosConsultados: [],
+    };
+  }
 
   // 1. Atalhos determinísticos (falar com balcão / pós-entrega)
   const det = detectarIntencaoDeterministica(textoAtual);
@@ -456,8 +525,10 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
     };
   }
 
+  const primeiraRespostaSessao = !sessaoAtiva.boasVindasEnviada;
+
   // 2. Saudação pura no início da conversa -> envia Logo Oficial + boas-vindas
-  if (!sessaoAtiva.boasVindasEnviada && historicoMensagens.length === 0 && isSaudacaoPura(textoAtual)) {
+  if (primeiraRespostaSessao && isSaudacaoPura(textoAtual)) {
     return {
       resposta: montarMensagemBoasVindas(nomeCliente, perfilCliente),
       transbordoHumano: false,
@@ -526,7 +597,7 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
       enviarLocalizacao: metadados.enviarLocalizacao,
       dadosPedido: metadados.dadosPedido,
       sessaoAtualizada: metadados.sessaoAtualizada,
-      enviarLogo: false,
+      enviarLogo: primeiraRespostaSessao,
       tipoBotoes: metadados.tipoBotoes,
       produtosConsultados: produtosRelevantes,
     };
