@@ -306,6 +306,13 @@ async function finalizarPedidoEDespachar({
         });
       }
 
+      if (db && typeof db.upsertCliente === 'function') {
+        await db.upsertCliente({
+          telefone: telefoneReal,
+          nome: dadosPedido.cliente_nome || nomeCliente || null,
+        }).catch(() => {});
+      }
+
       if (typeof supabaseService.registrarPedido === 'function') {
         const itensAcougue = (dadosPedido.itens || []).filter((i) => i.unidade === 'KG');
         const itensMercearia = (dadosPedido.itens || []).filter((i) => i.unidade !== 'KG');
@@ -437,17 +444,20 @@ async function executarTurnoConsolidado(chaveCanonica) {
       await whatsappAdapter.enviarLocalizacaoUniversal(destinoEnvio).catch(() => {});
     }
 
+    const payloadRegistro = {
+      clienteTelefone: telefoneReal || chaveCanonica,
+      nomeCliente: nomeCliente || sessaoAtiva.clienteNome || perfilCliente?.nome || null,
+      mensagemCliente: textoConsolidado,
+      tipoMensagem: isAudio ? 'audio' : 'texto',
+      respostaIA: resultado.resposta || '',
+      tempoRespostaMs: Date.now() - inicioMs,
+    };
+
     if (supabaseService && typeof supabaseService.registrarConversa === 'function') {
-      supabaseService
-        .registrarConversa({
-          clienteTelefone: telefoneReal || chaveCanonica,
-          nomeCliente: nomeCliente || sessaoAtiva.clienteNome || perfilCliente?.nome || null,
-          mensagemCliente: textoConsolidado,
-          tipoMensagem: isAudio ? 'audio' : 'texto',
-          respostaIA: resultado.resposta || '',
-          tempoRespostaMs: Date.now() - inicioMs,
-        })
-        .catch(() => {});
+      supabaseService.registrarConversa(payloadRegistro).catch(() => {});
+    }
+    if (db && typeof db.registrarConversa === 'function') {
+      db.registrarConversa(payloadRegistro).catch(() => {});
     }
 
     if (resultado.transbordoHumano || resultado.pausaSegundos) {
