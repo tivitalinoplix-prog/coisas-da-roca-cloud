@@ -6,6 +6,37 @@ const {
 
 const NOME_LOJA = process.env.NOME_LOJA || 'Açougue e Mercearia Coisas da Roça';
 
+const IDS_TESTADORES = ['998586180', '173679971422247'];
+
+function isTestador(id) {
+const texto = String(id || '');
+return IDS_TESTADORES.some((t) => texto.includes(t));
+}
+
+function isHorarioComercialAberto() {
+const agora = new Date();
+const partes = new Intl.DateTimeFormat('en-US', {
+timeZone: 'America/Sao_Paulo',
+weekday: 'short',
+hour: '2-digit',
+minute: '2-digit',
+hour12: false,
+}).formatToParts(agora);
+const mapa = {};
+for (const p of partes) {
+mapa[p.type] = p.value;
+}
+const dia = mapa.weekday;
+let hora = Number(mapa.hour);
+if (hora === 24) hora = 0;
+const minutos = hora * 60 + Number(mapa.minute);
+const abertura = 7 * 60 + 30;
+if (dia === 'Sun') {
+return minutos >= abertura && minutos < 13 * 60;
+}
+return minutos >= abertura && minutos < 19 * 60 + 30;
+}
+
 function obterChavesGemini() {
   return [
     process.env.GEMINI_API_KEY,
@@ -219,7 +250,7 @@ function mesclarEstadoSessao(sessaoAtual = {}, delta = null) {
   return base;
 }
 
-function extrairMetadadosResposta(textoBruto = '', sessaoAtual = {}) {
+function extrairMetadadosResposta(textoBruto = '', sessaoAtual = {}), opcoes = {} {
   const bruto = String(textoBruto || '');
 
   const transbordoHumano = /\[TRANSBORDO_ATENDENTE\]/i.test(bruto);
@@ -267,8 +298,16 @@ function extrairMetadadosResposta(textoBruto = '', sessaoAtual = {}) {
         total_estimado: Number(somaItens.toFixed(2)),
         itens: sessaoAtualizada.itens,
       };
+   
+   
     }
   }
+  const idClienteSanitizacao = opcoes?.chatId || opcoes?.clienteId || opcoes?.telefone || opcoes?.perfilCliente?.id || opcoes?.perfilCliente?.telefone || sessaoAtualizada?.chatId || sessaoAtualizada?.clienteId || sessaoAtualizada?.telefone || sessaoAtualizada?.id || '';
+if (pedidoFechado && !isHorarioComercialAberto() && !isTestador(idClienteSanitizacao)) {
+pedidoFechado = false;
+dadosPedido = null;
+}
+  
 
   return {
     textoCliente: sanitizarRespostaWhatsApp(bruto),
@@ -480,8 +519,22 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
   const temEnderecoValido = validarEnderecoEntrega(sessaoAtiva.endereco).valido;
   const isConfirmacaoCurta = /^(1|sim|s|ok|confirmar|confirmo|confirmado|pode fechar|fechar|fechado|pode mandar|manda|isso|isso mesmo|perfeito|certo|👍+|✅+|☑️+|✔️+|🥩+|🙏+|👏+|💯+)$/i.test(limpoAtalho);
 
-  if (temItensNoCarrinho && temEnderecoValido && isConfirmacaoCurta) {
-    const codigoPedido = String(Math.floor(100 + Math.random() * 900));
+  if (temItensNoCarrinho && temEnderecoValido && isConfirmacaoCurta)  {
+const idCliente = opcoes.chatId || opcoes.clienteId || opcoes.telefone || sessaoAtiva.chatId || sessaoAtiva.clienteId || sessaoAtiva.telefone || sessaoAtiva.id || perfilCliente?.id || perfilCliente?.telefone || '';
+if (!isHorarioComercialAberto() && !isTestador(idCliente)) {
+return {
+resposta: '📝 Seu pedido e endereço já ficaram anotados aqui no balcão! Como estamos fora do horário de expediente agora, assim que abrirmos às *07h30* nossa equipe já pesa os seus cortes na balança e te envia o valor exato com o Pix para confirmar a entrega, combinado? 🥩👍',
+transbordoHumano: false,
+pedidoFechado: false,
+enviarLocalizacao: false,
+dadosPedido: null,
+sessaoAtualizada: { ...sessaoAtiva, boasVindasEnviada: true },
+enviarLogo: false,
+tipoBotoes: null,
+produtosConsultados: [],
+};
+}
+      const codigoPedido = String(Math.floor(100 + Math.random() * 900));
     const somaItens = sessaoAtiva.itens.reduce((acc, it) => acc + (Number(it.subtotal) || 0), 0);
     const pgtoFinal = sessaoAtiva.forma_pagamento || perfilCliente?.forma_pagamento || 'Pix';
     const listaResumo = sessaoAtiva.itens.map((it) => `• *${it.quantidade}${it.unidade} - ${it.nome}* (_${it.observacao_corte || 'Padrão'}_) — *R$ ${Number(it.subtotal).toFixed(2).replace('.', ',')}*`).join('\n');
@@ -596,7 +649,7 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
     const metadados = extrairMetadadosResposta(respostaBruta, {
       ...sessaoAtiva,
       boasVindasEnviada: true,
-    });
+    }), opcoes;
 
     return {
       resposta: metadados.textoCliente,
