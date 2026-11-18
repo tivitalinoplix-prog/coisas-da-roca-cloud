@@ -214,7 +214,19 @@ async function consumirBufferMensagens(chave) {
 
 function isNumeroTestador(chave = '') {
   const cleanPhone = String(chave || '').replace(/\D/g, '');
-  return cleanPhone.includes('998586180') || cleanPhone.includes('173679971422247');
+  if (!cleanPhone) return false;
+  if (
+    cleanPhone.includes('998586180') ||
+    cleanPhone.includes('173679971422247') ||
+    cleanPhone.includes('148863600070757')
+  ) {
+    return true;
+  }
+  const envTestadores = String(process.env.TELEFONES_TESTADORES || '')
+    .split(',')
+    .map((s) => s.replace(/\D/g, ''))
+    .filter(Boolean);
+  return envTestadores.some((t) => cleanPhone.includes(t) || t.includes(cleanPhone));
 }
 
 async function ativarPausa(chave, segundos = TTL_PAUSA_PADRAO_SEG) {

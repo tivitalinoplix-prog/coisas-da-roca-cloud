@@ -157,6 +157,7 @@ function sanitizarRespostaWhatsApp(texto = '') {
 
 function mesclarEstadoSessao(sessaoAtual = {}, delta = null) {
   const base = {
+    ...sessaoAtual,
     clienteNome: sessaoAtual.clienteNome || '',
     itens: Array.isArray(sessaoAtual.itens) ? [...sessaoAtual.itens] : [],
     endereco: sessaoAtual.endereco || '',
@@ -165,6 +166,7 @@ function mesclarEstadoSessao(sessaoAtual = {}, delta = null) {
     troco_para: sessaoAtual.troco_para ?? null,
     etapa: sessaoAtual.etapa || 'COLETANDO',
     boasVindasEnviada: Boolean(sessaoAtual.boasVindasEnviada),
+    historico: Array.isArray(sessaoAtual.historico) ? [...sessaoAtual.historico] : [],
   };
 
   if (!delta || typeof delta !== 'object') return base;
@@ -377,8 +379,9 @@ async function chamarGeminiComResiliencia(systemInstruction, contents) {
   const modelos = Array.from(
     new Set([
       process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-      'gemini-2.0-flash',
-    ])
+      'gemini-2.5-flash',
+      'gemini-3.5-flash-lite',
+    ].filter(Boolean))
   );
 
   let ultimoErro = null;
@@ -439,8 +442,8 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
   let historicoMensagens = Array.isArray(sessaoAtiva.historico) ? [...sessaoAtiva.historico] : [];
   const textoAtual = String(mensagemCliente || '').trim();
 
-  // Reset de sessão por inatividade (> 2 horas)
-  const DUAS_HORAS_MS = 2 * 60 * 60 * 1000;
+  // Reset de sessão por inatividade (> 45 minutos) ou pedido anterior já fechado
+  const QUARENTA_E_CINCO_MIN_MS = 45 * 60 * 1000;
   const agora = Date.now();
   let ultimaMsgTimestamp = null;
 
@@ -458,8 +461,12 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
     }
   }
 
-  if (ultimaMsgTimestamp && (agora - ultimaMsgTimestamp > DUAS_HORAS_MS)) {
-    console.log(`[atendimentoReceptivoService] Sessão inativa há mais de 2 horas. Resetando boas-vindas e histórico.`);
+  const tempoInativoMs = ultimaMsgTimestamp ? (agora - ultimaMsgTimestamp) : 0;
+  const pedidoJaFechado = sessaoAtiva.etapa === 'FECHADO';
+  const deveResetarInatividade = tempoInativoMs > QUARENTA_E_CINCO_MIN_MS;
+
+  if (pedidoJaFechado || deveResetarInatividade) {
+    console.log(`[atendimentoReceptivoService] Resetando sessão (motivo: ${pedidoJaFechado ? 'PEDIDO_FECHADO' : 'INATIVIDADE'}).`);
     sessaoAtiva.boasVindasEnviada = false;
     sessaoAtiva.historico = [];
     sessaoAtiva.itens = [];
@@ -526,9 +533,10 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
   }
 
   const primeiraRespostaSessao = !sessaoAtiva.boasVindasEnviada;
+  const semItensNoCarrinho = !Array.isArray(sessaoAtiva.itens) || sessaoAtiva.itens.length === 0;
 
-  // 2. Saudação pura no início da conversa -> envia Logo Oficial + boas-vindas
-  if (primeiraRespostaSessao && isSaudacaoPura(textoAtual)) {
+  // 2. Saudação pura -> envia Logo Oficial + boas-vindas oficiais
+  if (isSaudacaoPura(textoAtual) && (primeiraRespostaSessao || semItensNoCarrinho)) {
     return {
       resposta: montarMensagemBoasVindas(nomeCliente, perfilCliente),
       transbordoHumano: false,

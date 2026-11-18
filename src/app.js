@@ -90,8 +90,16 @@ const TEMPO_DEBOUNCE_MS = Number(process.env.DEBOUNCE_MS || 7000);
 const TEMPO_PAUSA_HUMANA_SEG = Number(process.env.PAUSA_HUMANA_MINUTOS || 30) * 60;
 
 function isNumeroTestador(chave = '') {
+  if (redisService && typeof redisService.isNumeroTestador === 'function') {
+    return redisService.isNumeroTestador(chave);
+  }
   const cleanPhone = String(chave || '').replace(/\D/g, '');
-  return cleanPhone.includes('998586180') || cleanPhone.includes('173679971422247');
+  if (!cleanPhone) return false;
+  return (
+    cleanPhone.includes('998586180') ||
+    cleanPhone.includes('173679971422247') ||
+    cleanPhone.includes('148863600070757')
+  );
 }
 
 function isMensagemFornecedorOuRobo(texto = '', pushName = '') {
@@ -398,7 +406,10 @@ async function executarTurnoConsolidado(chaveCanonica) {
     }
 
     const sessaoParaSalvar = resultado.sessaoAtualizada || sessaoAtiva;
-    const historicoAtual = Array.isArray(sessaoParaSalvar.historico) ? [...sessaoParaSalvar.historico] : [];
+    const historicoBase = Array.isArray(sessaoParaSalvar.historico) && sessaoParaSalvar.historico.length > 0
+      ? sessaoParaSalvar.historico
+      : (Array.isArray(sessaoAtiva.historico) ? sessaoAtiva.historico : []);
+    const historicoAtual = [...historicoBase];
     historicoAtual.push({ role: 'user', content: textoConsolidado, timestamp: Date.now() });
     if (resultado.resposta) {
       historicoAtual.push({ role: 'model', content: resultado.resposta, timestamp: Date.now() });
@@ -711,8 +722,15 @@ app.post('/api/expediente/fechamento', autenticarWorkerInterno, async (req, res)
 });
 
 app.get('/worker-caixa1.ps1', autenticarWorkerInterno, (req, res) => {
-  const workerFile = path.resolve(__dirname, '../../scripts/worker_impressao_caixa1.ps1');
-  if (fs.existsSync(workerFile)) {
+  const candidatos = [
+    path.resolve(__dirname, '../../scripts/worker_impressao_caixa1.ps1'),
+    path.resolve(__dirname, '../scripts/worker_impressao_caixa1.ps1'),
+    path.resolve(__dirname, './worker_impressao_caixa1.ps1'),
+    path.resolve(__dirname, '../worker_impressao_caixa1.ps1'),
+    path.resolve(__dirname, 'worker_impressao_caixa1.ps1'),
+  ];
+  const workerFile = candidatos.find((p) => fs.existsSync(p));
+  if (workerFile) {
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     return res.sendFile(workerFile);
   }
