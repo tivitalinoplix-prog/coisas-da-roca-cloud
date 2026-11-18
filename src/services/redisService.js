@@ -211,9 +211,13 @@ async function consumirBufferMensagens(chave) {
   memBuffers.delete(key);
   return local;
 }
+function isTestadorImune(chave = '') {
+  const s = String(chave || '').toLowerCase();
+  return s.includes('998586180') || s.includes('173679971422247');
+}
 
 async function ativarPausa(chave, segundos = TTL_PAUSA_PADRAO_SEG) {
-  if (!chave) return;
+  if (!chave || isTestadorImune(chave)) return;
   const key = `pausa:${chave}`;
   const ttl = Math.max(60, Number(segundos) || TTL_PAUSA_PADRAO_SEG);
 
@@ -229,7 +233,7 @@ async function ativarPausa(chave, segundos = TTL_PAUSA_PADRAO_SEG) {
 }
 
 async function estaEmPausa(chave) {
-  if (!chave) return false;
+  if (!chave || isTestadorImune(chave)) return false;
   const key = `pausa:${chave}`;
 
   if (isRedisConectado()) {
@@ -506,6 +510,7 @@ module.exports = {
   adicionarBufferMensagem,
   consumirBufferMensagens,
   ativarPausa,
+  isTestadorImune,
   estaEmPausa,
   removerPausa,
   verificarEDeduplicarMensagem,
