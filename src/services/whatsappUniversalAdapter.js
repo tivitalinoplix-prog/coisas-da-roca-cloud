@@ -232,7 +232,7 @@ async function enviarImagemUniversal(telefone, base64OuUrl, caption = '') {
             Authorization: `Bearer ${WAPI_TOKEN}`,
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({ phone: destino, image: imgPayload, caption }),
+          body: JSON.stringify({ phone: destino, image: imgPayload, imageUrl: imgPayload, url: imgPayload, caption }),
           signal: controller.signal,
         });
         clearTimeout(timeout);
@@ -311,38 +311,7 @@ async function enviarBotoesUniversal(telefone, texto, botoes = [], rodape = 'Coi
     return enviarTextoUniversal(telefone, texto);
   }
 
-  if (GATEWAY_TYPE === 'WAPI' && WAPI_INSTANCE_ID && WAPI_TOKEN) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    try {
-      const url = `${WAPI_BASE_URL}/message/send-button-actions?instanceId=${WAPI_INSTANCE_ID}`;
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${WAPI_TOKEN}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          phone: destino,
-          message: texto,
-          footer: rodape,
-          buttonActions: botoes.slice(0, 3).map((b, idx) => ({
-            id: b.id || `btn_${idx + 1}`,
-            type: 'REPLY',
-            label: String(b.label || b.texto || '').slice(0, 20),
-          })),
-        }),
-        signal: controller.signal,
-      });
-      if (res.ok) {
-        return await lerRespostaGatewaySegura(res, 'WAPI send-button-actions');
-      }
-    } catch (err) {
-      console.warn('[WAPI Botoes] Aplicando fallback para texto:', err.message);
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
+  
 
   const opcoesTexto = botoes
     .slice(0, 3)
