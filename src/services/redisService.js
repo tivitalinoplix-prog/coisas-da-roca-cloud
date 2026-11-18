@@ -8,17 +8,23 @@ const TTL_PAUSA_PADRAO_SEG = Number(process.env.PAUSA_HUMANA_MINUTOS || 30) * 60
 const TTL_DEDUP_SEG = 5 * 60; // 5 minutos
 const TTL_FALTAS_SEG = 24 * 60 * 60; // 24 horas
 const TTL_LID_MAP_SEG = 30 * 24 * 60 * 60; // 30 dias
+const TTL_VISION_PENDENTE_SEG = 10 * 60; // 10 minutos
+const TTL_PEDIDO_ATIVO_SEG = 12 * 60 * 60; // 12 horas
+const TTL_LOCK_SEG = 30; // 30 segundos
 
 let redisClient = null;
 let redisConectado = false;
 
-// Fallback em memória caso REDIS_URL ainda não esteja configurada ou oscile
 const memSessoes = new Map();
 const memBuffers = new Map();
 const memPausas = new Map();
 const memDedup = new Map();
 const memFaltas = new Set();
+const memPrecosOverride = new Map();
 const memLidMap = new Map();
+const memVisionPendente = new Map();
+const memPedidosAtivos = new Map();
+const memLocks = new Map();
 
 if (REDIS_URL) {
   try {
@@ -69,6 +75,40 @@ function criarSessaoVazia() {
     historico: [],
     atualizadoEm: new Date().toISOString(),
   };
+}
+
+async function adquirirLock(chave, ttlSeg = TTL_LOCK_SEG) {
+  if (!chave) return true;
+  const key = `lock:${chave}`;
+
+  if (isRedisConectado()) {
+    try {
+      const ok = await redisClient.set(key, '1', 'EX', ttlSeg, 'NX');
+      return ok === 'OK';
+    } catch (err) {
+      console.warn('[Redis] Erro ao adquirir lock:', err.message);
+    }
+  }
+
+  const agora = Date.now();
+  const exp = memLocks.get(key) || 0;
+  if (exp > agora) return false;
+  memLocks.set(key, agora + ttlSeg * 1000);
+  return true;
+}
+
+async function liberarLock(chave) {
+  if (!chave) return;
+  const key = `lock:${chave}`;
+  memLocks.delete(key);
+
+  if (isRedisConectado()) {
+    try {
+      await redisClient.del(key);
+    } catch (err) {
+      console.warn('[Redis] Erro ao liberar lock:', err.message);
+    }
+  }
 }
 
 async function obterSessao(chave) {
@@ -222,14 +262,14 @@ async function removerPausa(chave) {
   }
 }
 
-async function verificarEDeduplicarMensagem(messageId) {
+async function verificarEDeduplicarMensagem(messageId, ttlSeg = TTL_DEDUP_SEG) {
   if (!messageId) return false;
   const key = `dedup:${messageId}`;
 
   if (isRedisConectado()) {
     try {
-      const res = await redisClient.set(key, '1', 'EX', TTL_DEDUP_SEG, 'NX');
-      return res === null; // true se já existia
+      const res = await redisClient.set(key, '1', 'EX', ttlSeg, 'NX');
+      return res === null;
     } catch (err) {
       console.warn('[Redis] Erro na deduplicação:', err.message);
     }
@@ -238,7 +278,7 @@ async function verificarEDeduplicarMensagem(messageId) {
   const agora = Date.now();
   const exp = memDedup.get(key);
   if (exp && exp > agora) return true;
-  memDedup.set(key, agora + TTL_DEDUP_SEG * 1000);
+  memDedup.set(key, agora + ttlSeg * 1000);
   return false;
 }
 
@@ -262,14 +302,17 @@ async function removerFalta(item) {
   if (!alvo) return;
 
   for (const x of Array.from(memFaltas)) {
-    if (x.toLowerCase() === alvo) memFaltas.delete(x);
+    if (x.toLowerCase().includes(alvo) || alvo.includes(x.toLowerCase())) {
+      memFaltas.delete(x);
+    }
   }
 
   if (isRedisConectado()) {
     try {
       const atuais = await redisClient.smembers('faltas_balcao');
       for (const x of atuais) {
-        if (String(x).toLowerCase() === alvo) {
+        const xl = String(x).toLowerCase();
+        if (xl === alvo || xl.includes(alvo) || alvo.includes(xl)) {
           await redisClient.srem('faltas_balcao', x);
         }
       }
@@ -289,6 +332,138 @@ async function listarFaltas() {
     }
   }
   return Array.from(memFaltas);
+}
+
+async function salvarPrecoOverride(itemNome, precoValor) {
+  const chave = String(itemNome || '').trim().toUpperCase();
+  const preco = Number(String(precoValor).replace(',', '.'));
+  if (!chave || !(preco > 0)) return false;
+
+  memPrecosOverride.set(chave, preco);
+
+  if (isRedisConectado()) {
+    try {
+      await redisClient.hset('precos_override', chave, String(preco));
+      await redisClient.expire('precos_override', TTL_FALTAS_SEG);
+    } catch (err) {
+      console.warn('[Redis] Erro ao salvar override de preço:', err.message);
+    }
+  }
+  return true;
+}
+
+async function listarPrecosOverride() {
+  if (isRedisConectado()) {
+    try {
+      const raw = await redisClient.hgetall('precos_override');
+      const out = {};
+      for (const [k, v] of Object.entries(raw || {})) {
+        out[k] = Number(v);
+      }
+      return out;
+    } catch (err) {
+      console.warn('[Redis] Erro ao listar overrides de preço:', err.message);
+    }
+  }
+
+  const out = {};
+  for (const [k, v] of memPrecosOverride.entries()) {
+    out[k] = v;
+  }
+  return out;
+}
+
+async function salvarVisionPendente(telefone, payloadVision) {
+  if (!telefone || !payloadVision) return;
+  const key = `vision_pendente:${telefone}`;
+  memVisionPendente.set(key, {
+    dados: payloadVision,
+    expiraEm: Date.now() + TTL_VISION_PENDENTE_SEG * 1000,
+  });
+
+  if (isRedisConectado()) {
+    try {
+      await redisClient.set(key, JSON.stringify(payloadVision), 'EX', TTL_VISION_PENDENTE_SEG);
+    } catch (err) {
+      console.warn('[Redis] Erro ao salvar vision_pendente:', err.message);
+    }
+  }
+}
+
+async function obterVisionPendente(telefone) {
+  if (!telefone) return null;
+  const key = `vision_pendente:${telefone}`;
+
+  if (isRedisConectado()) {
+    try {
+      const raw = await redisClient.get(key);
+      if (raw) return JSON.parse(raw);
+    } catch (err) {
+      console.warn('[Redis] Erro ao ler vision_pendente:', err.message);
+    }
+  }
+
+  const local = memVisionPendente.get(key);
+  if (local && local.expiraEm > Date.now()) return local.dados;
+  memVisionPendente.delete(key);
+  return null;
+}
+
+async function limparVisionPendente(telefone) {
+  if (!telefone) return;
+  const key = `vision_pendente:${telefone}`;
+  memVisionPendente.delete(key);
+
+  if (isRedisConectado()) {
+    try {
+      await redisClient.del(key);
+    } catch (err) {
+      console.warn('[Redis] Erro ao limpar vision_pendente:', err.message);
+    }
+  }
+}
+
+async function salvarPedidoAguardandoPesagem(codigoPedido, dadosPedido) {
+  if (!codigoPedido || !dadosPedido) return;
+  const codigoLimpo = String(codigoPedido).replace(/^PED-/i, '').trim();
+  const key = `pedido_ativo:${codigoLimpo}`;
+
+  memPedidosAtivos.set(key, {
+    dados: dadosPedido,
+    expiraEm: Date.now() + TTL_PEDIDO_ATIVO_SEG * 1000,
+  });
+  memPedidosAtivos.set('pedido_ativo:ULTIMO', {
+    dados: dadosPedido,
+    expiraEm: Date.now() + TTL_PEDIDO_ATIVO_SEG * 1000,
+  });
+
+  if (isRedisConectado()) {
+    try {
+      const str = JSON.stringify(dadosPedido);
+      await redisClient.set(key, str, 'EX', TTL_PEDIDO_ATIVO_SEG);
+      await redisClient.set('pedido_ativo:ULTIMO', str, 'EX', TTL_PEDIDO_ATIVO_SEG);
+    } catch (err) {
+      console.warn('[Redis] Erro ao salvar pedido_ativo:', err.message);
+    }
+  }
+}
+
+async function buscarPedidoAguardandoPesagem(codigoPedido = null) {
+  const codigoLimpo = codigoPedido ? String(codigoPedido).replace(/^PED-/i, '').trim() : 'ULTIMO';
+  const key = `pedido_ativo:${codigoLimpo}`;
+
+  if (isRedisConectado()) {
+    try {
+      const raw = await redisClient.get(key);
+      if (raw) return JSON.parse(raw);
+    } catch (err) {
+      console.warn('[Redis] Erro ao buscar pedido_ativo:', err.message);
+    }
+  }
+
+  const local = memPedidosAtivos.get(key);
+  if (local && local.expiraEm > Date.now()) return local.dados;
+  return null;
 }
 
 async function salvarMapeamentoLid(lidKey, telefoneReal) {
@@ -323,6 +498,8 @@ async function obterTelefonePorLid(lidKey) {
 module.exports = {
   isRedisConectado,
   criarSessaoVazia,
+  adquirirLock,
+  liberarLock,
   obterSessao,
   salvarSessao,
   limparSessao,
@@ -335,6 +512,13 @@ module.exports = {
   adicionarFalta,
   removerFalta,
   listarFaltas,
+  salvarPrecoOverride,
+  listarPrecosOverride,
+  salvarVisionPendente,
+  obterVisionPendente,
+  limparVisionPendente,
+  salvarPedidoAguardandoPesagem,
+  buscarPedidoAguardandoPesagem,
   salvarMapeamentoLid,
   obterTelefonePorLid,
 };

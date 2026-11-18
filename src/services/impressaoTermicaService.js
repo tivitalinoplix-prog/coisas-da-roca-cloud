@@ -1,6 +1,7 @@
 /**
  * SERVIÇO DE FORMATAÇÃO E FILA DE IMPRESSÃO ESC/POS (CAIXA 1 PDV)
- * Padrão: MP-80M / RPP02N (48 Colunas, ASCII Puro Sanitizado)
+ * Padrão: MP-80M / Bematech 80mm (48 Colunas, ASCII Puro Sanitizado)
+ * Emite 2 vias por pedido (Via 1: Bancada de Corte em DOUBLE_HEIGHT+BOLD | Via 2: Caixa/Entrega)
  */
 
 const { pool } = require('../database');
@@ -21,19 +22,16 @@ const COMANDOS = {
   ALIGN_RIGHT: `${ESC}a${String.fromCharCode(2)}`,
   CUT_FULL: `${GS}V${String.fromCharCode(0)}`,
   CUT_PARTIAL: `${GS}V${String.fromCharCode(1)}`,
-  BEEP: `${ESC}B${String.fromCharCode(2)}${String.fromCharCode(5)}`
+  BEEP: `${ESC}B${String.fromCharCode(2)}${String.fromCharCode(5)}`,
 };
 
-/**
- * Converte qualquer string UTF-8 acentuada para ASCII puro compatível com bobina térmica ESC/POS
- */
 function sanitizarParaTermica(str) {
   if (!str) return '';
   return String(str)
     .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '') // Remove diacríticos (ã -> a, ç -> c, é -> e)
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/[•·]/g, '-')
-    .replace(/[^\x20-\x7E]/g, '')    // Remove emojis e bytes fora da tabela ASCII (32-126)
+    .replace(/[^\x20-\x7E]/g, '')
     .trim();
 }
 
@@ -65,25 +63,17 @@ function montarComandaEscPos(pedido) {
     escpos += `${sanitizarParaTermica(txt)}\n`;
   };
 
+  const dataHora = new Date().toLocaleString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+
   escpos += COMANDOS.INIT;
 
-  // Cabeçalho Compacto Econômico de Bobina
-  appendTexto('COISAS DA ROCA - MACAE/RJ', 'CENTER', true, 'DOUBLE_HEIGHT');
-  appendTexto('DESDE 1993 - PAIXAO POR CARNE', 'CENTER', false, 'NORMAL');
+  // =========================================================================
+  // VIA 1: PRODUÇÃO / BANCADA DE CORTE (FONTE GRANDE LEGÍVEL A 2 METROS)
+  // =========================================================================
+  appendTexto('COISAS DA ROCA - VIA 1 (CORTE/PRODUCAO)', 'CENTER', true, 'DOUBLE_HEIGHT');
   appendTexto('================================================', 'CENTER', false, 'NORMAL');
-  appendTexto('*** COMANDA DE PREPARO (BALCAO) ***', 'CENTER', true, 'NORMAL');
-  appendTexto('================================================', 'CENTER', false, 'NORMAL');
-
-  // Dados do Cliente e Entrega Sanitizados
-  appendTexto(`PEDIDO : #${pedido.pedidoId}`, 'LEFT', true, 'DOUBLE_HEIGHT');
-  appendTexto(`DATA   : ${new Date().toLocaleString('pt-BR')}`, 'LEFT', false, 'NORMAL');
+  appendTexto(`PEDIDO #${pedido.pedidoId}   |   ${dataHora}`, 'LEFT', true, 'DOUBLE_HEIGHT');
   appendTexto(`CLIENTE: ${pedido.clienteNome}`, 'LEFT', true, 'DOUBLE_HEIGHT');
-  appendTexto(`CONTATO: ${pedido.clienteTelefone}`, 'LEFT', false, 'NORMAL');
-  appendTexto(`ENTREGA: ${pedido.enderecoEntrega || 'Retirada no Balcao'}`, 'LEFT', true, 'NORMAL');
-  appendTexto(`PGTO   : ${pedido.formaPagamento || 'A combinar'}`, 'LEFT', true, 'NORMAL');
-  appendTexto('------------------------------------------------', 'CENTER', false, 'NORMAL');
-
-  appendTexto(formatarLinhaDupla('CORTES / ITENS', 'QTD', 48), 'LEFT', true, 'NORMAL');
   appendTexto('------------------------------------------------', 'CENTER', false, 'NORMAL');
 
   (pedido.itens || []).forEach((item, idx) => {
@@ -91,13 +81,40 @@ function montarComandaEscPos(pedido) {
     const qtdStr = sanitizarParaTermica(item.quantidade || '1 un');
     appendTexto(formatarLinhaDupla(desc, qtdStr, 48), 'LEFT', true, 'DOUBLE_HEIGHT');
     if (item.preparo) {
-      appendTexto(`   >> Preparo: ${sanitizarParaTermica(item.preparo)}`, 'LEFT', false, 'NORMAL');
+      appendTexto(`   >> CORTE: ${sanitizarParaTermica(item.preparo)}`, 'LEFT', true, 'DOUBLE_HEIGHT');
+    }
+  });
+
+  appendTexto('================================================', 'CENTER', false, 'NORMAL');
+  escpos += '\n\n';
+  escpos += COMANDOS.CUT_PARTIAL;
+
+  // =========================================================================
+  // VIA 2: CAIXA 1 / EXPEDIÇÃO E MOTOBOY
+  // =========================================================================
+  appendTexto('COISAS DA ROCA - VIA 2 (CAIXA / ENTREGA)', 'CENTER', true, 'DOUBLE_HEIGHT');
+  appendTexto('================================================', 'CENTER', false, 'NORMAL');
+  appendTexto(`PEDIDO : #${pedido.pedidoId}`, 'LEFT', true, 'DOUBLE_HEIGHT');
+  appendTexto(`DATA   : ${dataHora}`, 'LEFT', false, 'NORMAL');
+  appendTexto(`CLIENTE: ${pedido.clienteNome}`, 'LEFT', true, 'DOUBLE_HEIGHT');
+  appendTexto(`CONTATO: ${pedido.clienteTelefone}`, 'LEFT', false, 'NORMAL');
+  appendTexto(`ENTREGA: ${pedido.enderecoEntrega || 'Retirada no Balcao'}`, 'LEFT', true, 'NORMAL');
+  appendTexto(`PGTO   : ${pedido.formaPagamento || 'A combinar'}`, 'LEFT', true, 'DOUBLE_HEIGHT');
+  appendTexto('------------------------------------------------', 'CENTER', false, 'NORMAL');
+
+  (pedido.itens || []).forEach((item, idx) => {
+    const desc = `${idx + 1}. ${sanitizarParaTermica(item.descricao)}`;
+    const qtdStr = sanitizarParaTermica(item.quantidade || '1 un');
+    appendTexto(formatarLinhaDupla(desc, qtdStr, 48), 'LEFT', true, 'NORMAL');
+    if (item.preparo) {
+      appendTexto(`   Obs: ${sanitizarParaTermica(item.preparo)}`, 'LEFT', false, 'NORMAL');
     }
   });
 
   appendTexto('------------------------------------------------', 'CENTER', false, 'NORMAL');
-  appendTexto('PESO REAL BALANCA / CONFERENCIA:', 'LEFT', true, 'NORMAL');
-  appendTexto('[  ] Peso conferido: ____________ R$: __________', 'LEFT', false, 'NORMAL');
+  appendTexto('CONFERENCIA BALANCA / ETIQUETA EAN-13:', 'LEFT', true, 'NORMAL');
+  appendTexto('[ ] Peso Real: __________ Valor Final R$: _______', 'LEFT', false, 'NORMAL');
+  appendTexto('[ ] Motoboy  : __________ Rubrica: ______________', 'LEFT', false, 'NORMAL');
   appendTexto('================================================', 'CENTER', false, 'NORMAL');
 
   escpos += '\n\n\n';
@@ -107,69 +124,116 @@ function montarComandaEscPos(pedido) {
   return escpos;
 }
 
+function montarFitaFechamentoEscPos(resumo) {
+  let escpos = COMANDOS.INIT;
+  const append = (txt, align = 'LEFT', bold = false, size = 'NORMAL') => {
+    escpos += align === 'CENTER' ? COMANDOS.ALIGN_CENTER : COMANDOS.ALIGN_LEFT;
+    escpos += size === 'DOUBLE_HEIGHT' ? COMANDOS.DOUBLE_HEIGHT : COMANDOS.TEXT_NORMAL;
+    escpos += bold ? COMANDOS.TEXT_BOLD : COMANDOS.TEXT_NO_BOLD;
+    escpos += `${sanitizarParaTermica(txt)}\n`;
+  };
+
+  append('COISAS DA ROCA - FECHAMENTO DO DIA', 'CENTER', true, 'DOUBLE_HEIGHT');
+  append(`DATA: ${resumo.data || new Date().toLocaleDateString('pt-BR')}`, 'CENTER', false, 'NORMAL');
+  append('================================================', 'CENTER', false, 'NORMAL');
+  append(formatarLinhaDupla('TOTAL DE PEDIDOS WHATSAPP:', String(resumo.totalPedidos || 0)), 'LEFT', true, 'DOUBLE_HEIGHT');
+  append(formatarLinhaDupla('FATURAMENTO ESTIMADO:', `R$ ${Number(resumo.faturamentoTotal || 0).toFixed(2)}`), 'LEFT', true, 'DOUBLE_HEIGHT');
+  append('------------------------------------------------', 'CENTER', false, 'NORMAL');
+  append('DIVISAO POR PAGAMENTO:', 'LEFT', true, 'NORMAL');
+  append(formatarLinhaDupla('- Pix:', `R$ ${Number(resumo.porPagamento?.PIX || 0).toFixed(2)}`), 'LEFT', false, 'NORMAL');
+  append(formatarLinhaDupla('- Cartao:', `R$ ${Number(resumo.porPagamento?.CARTAO || 0).toFixed(2)}`), 'LEFT', false, 'NORMAL');
+  append(formatarLinhaDupla('- Dinheiro:', `R$ ${Number(resumo.porPagamento?.DINHEIRO || 0).toFixed(2)}`), 'LEFT', false, 'NORMAL');
+  append('================================================', 'CENTER', false, 'NORMAL');
+  escpos += '\n\n\n' + COMANDOS.CUT_FULL;
+  return escpos;
+}
+
 async function enfileirarImpressaoPedido(pedido) {
   const dadosEscpos = montarComandaEscPos(pedido);
   const base64Escpos = Buffer.from(dadosEscpos, 'ascii').toString('base64');
 
-  const res = await pool.query(`
-    INSERT INTO fila_impressao (
-      pedido_id, cliente_telefone, cliente_nome, tipo_comanda, 
+  const res = await pool.query(
+    `INSERT INTO fila_impressao (
+      pedido_id, cliente_telefone, cliente_nome, tipo_comanda,
       dados_formatados_escpos, status, criado_em, atualizado_em
     ) VALUES ($1, $2, $3, $4, $5, 'PENDENTE', NOW(), NOW())
-    RETURNING id, pedido_id, status;
-  `, [
-    pedido.pedidoId,
-    pedido.clienteTelefone,
-    sanitizarParaTermica(pedido.clienteNome),
-    'ACOUGUE',
-    base64Escpos
-  ]);
+    RETURNING id, pedido_id, status;`,
+    [
+      pedido.pedidoId,
+      pedido.clienteTelefone,
+      sanitizarParaTermica(pedido.clienteNome),
+      'ACOUGUE',
+      base64Escpos,
+    ]
+  );
 
   return res.rows[0];
 }
 
-/**
- * Busca atômica com FOR UPDATE SKIP LOCKED para impedir impressão duplicada no polling do Caixa 1
- */
-async function buscarProximoPedidoFila() {
-  // Destrava eventuais jobs que ficaram em IMPRIMINDO há mais de 2 minutos por falha de rede local
-  await pool.query(`
-    UPDATE fila_impressao
-    SET status = 'PENDENTE', atualizado_em = NOW()
-    WHERE status = 'IMPRIMINDO'
-      AND atualizado_em < NOW() - INTERVAL '2 minutes';
-  `).catch(() => {});
+async function enfileirarFitaFechamento(resumo) {
+  const dadosEscpos = montarFitaFechamentoEscPos(resumo);
+  const base64Escpos = Buffer.from(dadosEscpos, 'ascii').toString('base64');
 
-  const res = await pool.query(`
-    UPDATE fila_impressao
-    SET status = 'IMPRIMINDO', atualizado_em = NOW()
-    WHERE id = (
-      SELECT id
-      FROM fila_impressao
-      WHERE status = 'PENDENTE'
-      ORDER BY criado_em ASC
-      FOR UPDATE SKIP LOCKED
-      LIMIT 1
+  const res = await pool.query(
+    `INSERT INTO fila_impressao (
+      pedido_id, cliente_telefone, cliente_nome, tipo_comanda,
+      dados_formatados_escpos, status, criado_em, atualizado_em
+    ) VALUES ($1, $2, $3, 'FECHAMENTO', $4, 'PENDENTE', NOW(), NOW())
+    RETURNING id, pedido_id, status;`,
+    [
+      `FECH-${new Date().toISOString().slice(0, 10)}`,
+      'LOJA',
+      'FECHAMENTO EXPEDIENTE 19H30',
+      base64Escpos,
+    ]
+  );
+
+  return res.rows[0];
+}
+
+async function buscarProximoPedidoFila() {
+  await pool
+    .query(
+      `UPDATE fila_impressao
+       SET status = 'PENDENTE', atualizado_em = NOW()
+       WHERE status = 'IMPRIMINDO'
+         AND atualizado_em < NOW() - INTERVAL '2 minutes';`
     )
-    RETURNING id, pedido_id, cliente_nome, dados_formatados_escpos;
-  `);
+    .catch(() => {});
+
+  const res = await pool.query(
+    `UPDATE fila_impressao
+     SET status = 'IMPRIMINDO', atualizado_em = NOW()
+     WHERE id = (
+       SELECT id
+       FROM fila_impressao
+       WHERE status = 'PENDENTE'
+       ORDER BY criado_em ASC
+       FOR UPDATE SKIP LOCKED
+       LIMIT 1
+     )
+     RETURNING id, pedido_id, cliente_nome, dados_formatados_escpos;`
+  );
 
   return res.rows[0] || null;
 }
 
 async function confirmarImpressaoJob(id) {
-  const res = await pool.query(`
-    UPDATE fila_impressao 
-    SET status = 'IMPRESSO', impresso_em = NOW(), atualizado_em = NOW() 
-    WHERE id = $1;
-  `, [id]);
+  const res = await pool.query(
+    `UPDATE fila_impressao
+     SET status = 'IMPRESSO', impresso_em = NOW(), atualizado_em = NOW()
+     WHERE id = $1;`,
+    [id]
+  );
   return res.rowCount > 0;
 }
 
 module.exports = {
   sanitizarParaTermica,
   montarComandaEscPos,
+  montarFitaFechamentoEscPos,
   enfileirarImpressaoPedido,
+  enfileirarFitaFechamento,
   buscarProximoPedidoFila,
-  confirmarImpressaoJob
+  confirmarImpressaoJob,
 };

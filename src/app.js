@@ -6,6 +6,9 @@ const path = require('path');
 
 const { processarMensagemReceptiva } = require('./services/atendimentoReceptivoService');
 const redisService = require('./services/redisService');
+const visaoComandosService = require('./services/visaoComandosService');
+const pesagemPixService = require('./services/pesagemPixService');
+const { executarFechamentoExpediente } = require('./services/fechamentoExpedienteService');
 
 let db = null;
 try {
@@ -42,6 +45,16 @@ try {
   console.warn('[app] impressaoTermicaService.js indisponível:', e.message);
 }
 
+let cronService = null;
+try {
+  cronService = require('./services/cronService');
+  if (cronService && typeof cronService.iniciarRotinasAgendadas === 'function') {
+    cronService.iniciarRotinasAgendadas();
+  }
+} catch (e) {
+  console.warn('[app] cronService.js indisponível:', e.message);
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
@@ -50,6 +63,16 @@ app.use('/assets', express.static(path.join(__dirname, 'assets')));
 
 const PORT = process.env.PORT || 3001;
 const INTERNAL_API_KEY = process.env.INTERNAL_API_KEY || 'coisasdaroca_internal_caixa1_secret_2026';
+
+const logoPath = path.join(__dirname, 'assets', 'logo_coisas_da_roca.jpg');
+let logoBase64 = null;
+if (fs.existsSync(logoPath)) {
+  try {
+    logoBase64 = `data:image/jpeg;base64,${fs.readFileSync(logoPath).toString('base64')}`;
+  } catch (e) {
+    console.warn('[app] Falha ao carregar logo_coisas_da_roca.jpg:', e.message);
+  }
+}
 
 function autenticarWorkerInterno(req, res, next) {
   if (!INTERNAL_API_KEY) return next();
@@ -60,51 +83,35 @@ function autenticarWorkerInterno(req, res, next) {
   next();
 }
 
-const mapaLidParaTelefone = new Map();
-const historicoSessoes = new Map();
-const pausasAtendimentoHumano = new Map();
 const mensagensEnviadasPeloBot = new Set();
-const mensagensProcessadasIds = new Map();
-const buffersDebounce = new Map();
-const processamentoEmAndamento = new Set();
-const filaPendentePosLock = new Map();
+const timersDebounceLocais = new Map();
 
-const TEMPO_DEBOUNCE_MS = Number(process.env.DEBOUNCE_MS || 3500);
-const TEMPO_PAUSA_HUMANA_MS = Number(process.env.PAUSA_HUMANA_MINUTOS || 30) * 60 * 1000;
-const TTL_SESSAO_MS = 24 * 60 * 60 * 1000; // 24 horas
-const TTL_DEDUP_MSG_MS = 5 * 60 * 1000;
+const TEMPO_DEBOUNCE_MS = Number(process.env.DEBOUNCE_MS || 7000);
+const TEMPO_PAUSA_HUMANA_SEG = Number(process.env.PAUSA_HUMANA_MINUTOS || 30) * 60;
 
-setInterval(() => {
-  const agora = Date.now();
-  for (const [k, expiraEm] of pausasAtendimentoHumano.entries()) {
-    if (expiraEm <= agora) pausasAtendimentoHumano.delete(k);
-  }
-  for (const [k, msgs] of historicoSessoes.entries()) {
-    const validas = msgs.filter((m) => agora - (m.timestamp || agora) < TTL_SESSAO_MS);
-    if (validas.length === 0) historicoSessoes.delete(k);
-    else if (validas.length !== msgs.length) historicoSessoes.set(k, validas);
-  }
-  for (const [msgId, ts] of mensagensProcessadasIds.entries()) {
-    if (agora - ts > TTL_DEDUP_MSG_MS) mensagensProcessadasIds.delete(msgId);
-  }
-}, 15 * 60 * 1000).unref();
+function isMensagemFornecedorOuRobo(texto = '', pushName = '') {
+  const txt = String(texto || '').toLowerCase();
+  const nome = String(pushName || '').toLowerCase();
 
-function migrarSessaoSeNecessario(chaveOrigem, chaveDestino) {
-  if (!chaveOrigem || !chaveDestino || chaveOrigem === chaveDestino) return;
-
-  if (historicoSessoes.has(chaveOrigem)) {
-    const antiga = historicoSessoes.get(chaveOrigem) || [];
-    const atual = historicoSessoes.get(chaveDestino) || [];
-    historicoSessoes.set(chaveDestino, [...antiga, ...atual].slice(-20));
-    historicoSessoes.delete(chaveOrigem);
+  const termosRobo = [
+    'statementcallback', 'bad sql grammar', 'chat_bot', 'java.sql',
+    'funcao invalida', 'função inválida', 'opcao invalida', 'opção inválida',
+    'atendimento automatico', 'atendimento automático', 'ticket antecipado',
+  ];
+  for (const t of termosRobo) {
+    if (txt.includes(t)) return `Chatbot/Sistema (${t})`;
   }
 
-  if (pausasAtendimentoHumano.has(chaveOrigem)) {
-    const expiraOrigem = pausasAtendimentoHumano.get(chaveOrigem);
-    const expiraDestino = pausasAtendimentoHumano.get(chaveDestino) || 0;
-    pausasAtendimentoHumano.set(chaveDestino, Math.max(expiraOrigem, expiraDestino));
-    pausasAtendimentoHumano.delete(chaveOrigem);
+  const termosFornecedores = [
+    'panko', 'dan solucoes', 'dan soluções', 'dam solucoes', 'dam soluções',
+    'arte fruti', 'artefruti', 'menino do polvilho', 'macae med', 'macaé med',
+    'andre grafica', 'andré gráfica', 'ticket antecipado de reembolso',
+  ];
+  for (const t of termosFornecedores) {
+    if (txt.includes(t) || nome.includes(t)) return `Fornecedor (${t})`;
   }
+
+  return null;
 }
 
 async function resolverIdentificadorUnificado(normalizado, body = {}) {
@@ -127,27 +134,18 @@ async function resolverIdentificadorUnificado(normalizado, body = {}) {
     : null;
 
   if (lidKey && telCandidato) {
-    mapaLidParaTelefone.set(lidKey, telCandidato);
-    redisService.salvarMapeamentoLid(lidKey, telCandidato).catch(() => {});
-    migrarSessaoSeNecessario(lidKey, telCandidato);
+    await redisService.salvarMapeamentoLid(lidKey, telCandidato);
   }
 
-  if (sessionKey.startsWith('lid:') && !mapaLidParaTelefone.has(sessionKey)) {
-    try {
-      const telMapeadoRedis = await redisService.obterTelefonePorLid(sessionKey);
-      if (telMapeadoRedis) {
-        mapaLidParaTelefone.set(sessionKey, telMapeadoRedis);
-      }
-    } catch (_) {}
-  }
-
-  if (sessionKey.startsWith('lid:') && mapaLidParaTelefone.has(sessionKey)) {
-    const telMapeado = mapaLidParaTelefone.get(sessionKey);
-    return {
-      chaveCanonica: telMapeado,
-      destinoEnvio: replyTarget,
-      telefoneReal: telMapeado,
-    };
+  if (sessionKey.startsWith('lid:')) {
+    const telMapeado = await redisService.obterTelefonePorLid(sessionKey);
+    if (telMapeado) {
+      return {
+        chaveCanonica: telMapeado,
+        destinoEnvio: replyTarget,
+        telefoneReal: telMapeado,
+      };
+    }
   }
 
   const chaveCanonica = sessionKey || telCandidato || '';
@@ -177,9 +175,7 @@ function registrarEnvioBot(chaveCanonica, texto, messageId = null) {
 }
 
 function foiEnviadoPeloBot(chaveCanonica, texto, messageId = null) {
-  if (messageId && mensagensEnviadasPeloBot.has(`id:${messageId}`)) {
-    return true;
-  }
+  if (messageId && mensagensEnviadasPeloBot.has(`id:${messageId}`)) return true;
   if (texto) {
     const assinatura = `${chaveCanonica}:${String(texto).slice(0, 60).trim()}`;
     if (mensagensEnviadasPeloBot.has(assinatura)) return true;
@@ -187,37 +183,29 @@ function foiEnviadoPeloBot(chaveCanonica, texto, messageId = null) {
   return false;
 }
 
-async function enviarMensagemWhatsApp(destino, texto) {
+async function enviarMensagemWhatsApp(destino, texto, tipoBotoes = null) {
   if (!destino || !texto) return null;
+
+  if (tipoBotoes && whatsappAdapter && typeof whatsappAdapter.enviarBotoesUniversal === 'function') {
+    const botoes =
+      tipoBotoes === 'PAGAMENTO'
+        ? [
+            { id: 'pgto_pix', label: 'Pix' },
+            { id: 'pgto_cartao', label: 'Cartão na Entrega' },
+            { id: 'pgto_dinheiro', label: 'Dinheiro' },
+          ]
+        : [
+            { id: 'conf_sim', label: 'Confirmar Pedido' },
+            { id: 'conf_mais', label: 'Adicionar Mais' },
+            { id: 'conf_balcao', label: 'Falar com Balcão' },
+          ];
+    return whatsappAdapter.enviarBotoesUniversal(destino, texto, botoes);
+  }
 
   if (whatsappAdapter && typeof whatsappAdapter.enviarTextoUniversal === 'function') {
     return whatsappAdapter.enviarTextoUniversal(destino, texto);
   }
 
-  const baseUrl = (process.env.WAPI_BASE_URL || 'https://api.w-api.app/v1').replace(/\/$/, '');
-  const instanceId = process.env.WAPI_INSTANCE_ID;
-  const token = process.env.WAPI_TOKEN;
-
-  if (baseUrl && instanceId && token) {
-    const phoneLimpo = /@lid/i.test(destino)
-      ? destino
-      : String(destino).replace(/@s\.whatsapp\.net|@c\.us/gi, '');
-    const res = await fetch(`${baseUrl}/message/send-text?instanceId=${instanceId}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({
-        phone: phoneLimpo,
-        message: texto,
-        delayMessage: 0,
-      }),
-    });
-    return res.json().catch(() => null);
-  }
-
-  console.warn('[app] Nenhum método de envio WhatsApp configurado para responder:', destino);
   return null;
 }
 
@@ -285,12 +273,15 @@ async function carregarPerfilCliente(telefoneReal) {
 
 async function finalizarPedidoEDespachar({
   chaveCanonica,
+  destinoEnvio,
   telefoneReal,
   nomeCliente,
   dadosPedido,
   respostaIA,
 }) {
-  if (!dadosPedido) return;
+  if (!dadosPedido) return false;
+
+  const codigoPedido = dadosPedido.codigo_pedido || Date.now().toString().slice(-4);
 
   if (telefoneReal && supabaseService) {
     try {
@@ -318,10 +309,11 @@ async function finalizarPedidoEDespachar({
     }
   }
 
+  let enfileirou = false;
   try {
     if (impressaoTermicaService && typeof impressaoTermicaService.enfileirarImpressaoPedido === 'function') {
       await impressaoTermicaService.enfileirarImpressaoPedido({
-        pedidoId: dadosPedido.codigo_pedido || Date.now().toString().slice(-4),
+        pedidoId: codigoPedido,
         clienteNome: dadosPedido.cliente_nome || nomeCliente || 'Cliente WhatsApp',
         clienteTelefone: telefoneReal || chaveCanonica,
         enderecoEntrega: dadosPedido.endereco || 'Retirada no Balcao',
@@ -332,156 +324,178 @@ async function finalizarPedidoEDespachar({
           preparo: it.observacao_corte || 'Padrao da casa',
         })),
       });
+      enfileirou = true;
     }
   } catch (err) {
     console.error('[app] Erro ao enfileirar impressão térmica:', err.message);
   }
 
-  historicoSessoes.delete(chaveCanonica);
-  await redisService.limparSessao(chaveCanonica);
+  await redisService.salvarPedidoAguardandoPesagem(codigoPedido, {
+    codigoPedido,
+    clienteNome: dadosPedido.cliente_nome || nomeCliente || 'Cliente WhatsApp',
+    clienteTelefone: destinoEnvio || telefoneReal || chaveCanonica,
+    formaPagamento: dadosPedido.forma_pagamento || 'Pix',
+    itens: dadosPedido.itens || [],
+  });
+
+  if (enfileirou) {
+    await redisService.limparSessao(chaveCanonica);
+    await redisService.ativarPausa(chaveCanonica, TEMPO_PAUSA_HUMANA_SEG);
+  }
+  return enfileirou;
 }
 
 async function executarTurnoConsolidado(chaveCanonica) {
-  const pacote = buffersDebounce.get(chaveCanonica);
-  buffersDebounce.delete(chaveCanonica);
+  timersDebounceLocais.delete(chaveCanonica);
 
-  if (!pacote || !pacote.mensagens.length) return;
-
-  const emPausaRedis = await redisService.estaEmPausa(chaveCanonica);
-  const emPausaMemoria = (pausasAtendimentoHumano.get(chaveCanonica) || 0) > Date.now();
-  if (emPausaRedis || emPausaMemoria) {
+  const obteveLock = await redisService.adquirirLock(chaveCanonica, 30);
+  if (!obteveLock) {
+    const t = setTimeout(() => executarTurnoConsolidado(chaveCanonica), 1500);
+    timersDebounceLocais.set(chaveCanonica, t);
     return;
   }
-
-  if (processamentoEmAndamento.has(chaveCanonica)) {
-    const pendente = filaPendentePosLock.get(chaveCanonica) || { mensagens: [], meta: pacote.meta };
-    pendente.mensagens.push(...pacote.mensagens);
-    pendente.meta = { ...pendente.meta, ...pacote.meta };
-    filaPendentePosLock.set(chaveCanonica, pendente);
-    return;
-  }
-
-  processamentoEmAndamento.add(chaveCanonica);
-  const inicioMs = Date.now();
 
   try {
-    const textoConsolidado = pacote.mensagens.join('\n');
-    const { destinoEnvio, telefoneReal, nomeCliente } = pacote.meta;
+    const mensagensLote = await redisService.consumirBufferMensagens(chaveCanonica);
+    if (!mensagensLote.length) return;
 
-    // Hidrata sessão unificada no Redis (com fallback gracioso em memória)
+    if (await redisService.estaEmPausa(chaveCanonica)) {
+      return;
+    }
+
+    const inicioMs = Date.now();
+    const ultimoMeta = mensagensLote[mensagensLote.length - 1];
+    const textoConsolidado = mensagensLote.map((m) => m.texto).filter(Boolean).join('\n');
+    const { destinoEnvio, telefoneReal, nomeCliente, isAudio } = ultimoMeta;
+
+    if (!textoConsolidado) return;
+
+    if (whatsappAdapter?.enviarPresencaUniversal) {
+      whatsappAdapter.enviarPresencaUniversal(destinoEnvio, 'composing').catch(() => {});
+    }
+
     const sessaoAtiva = await redisService.obterSessao(chaveCanonica);
-    const faltasBalcao = await redisService.listarFaltas();
+    if (nomeCliente && !sessaoAtiva.clienteNome) {
+      sessaoAtiva.clienteNome = nomeCliente;
+    }
+
     const perfilCliente = await carregarPerfilCliente(telefoneReal);
+    const faltasBalcao = await redisService.listarFaltas();
 
     const resultado = await processarMensagemReceptiva(textoConsolidado, sessaoAtiva, {
-      nomeCliente: nomeCliente || perfilCliente?.nome || sessaoAtiva.clienteNome || '',
+      nomeCliente: nomeCliente || sessaoAtiva.clienteNome || perfilCliente?.nome || '',
       perfilCliente,
       faltasBalcao,
     });
 
-    const aindaEmPausa =
-      (await redisService.estaEmPausa(chaveCanonica)) ||
-      (pausasAtendimentoHumano.get(chaveCanonica) || 0) > Date.now();
-
-    if (aindaEmPausa) {
-      console.log(`[app] Resposta descartada para ${chaveCanonica}: operador humano assumiu durante processamento.`);
+    if (await redisService.estaEmPausa(chaveCanonica)) {
       return;
     }
 
-    // Persiste atualização da sessão rica no Redis
-    if (resultado.sessaoAtualizada) {
-      await redisService.salvarSessao(chaveCanonica, resultado.sessaoAtualizada);
-    }
-
-    // Se a IA indicou envio de logo nas boas-vindas
-    if (resultado.enviarLogo) {
-      const logoUrl =
-        process.env.URL_LOGO_OFICIAL ||
-        'https://coisasdaroca-core-production.up.railway.app/assets/logo.png';
-      if (whatsappAdapter && typeof whatsappAdapter.enviarImagemUniversal === 'function') {
-        whatsappAdapter.enviarImagemUniversal(destinoEnvio, logoUrl, '').catch(() => {});
-      }
-    }
-
+    const sessaoParaSalvar = resultado.sessaoAtualizada || sessaoAtiva;
+    const historicoAtual = Array.isArray(sessaoParaSalvar.historico) ? [...sessaoParaSalvar.historico] : [];
+    historicoAtual.push({ role: 'user', content: textoConsolidado, timestamp: Date.now() });
     if (resultado.resposta) {
+      historicoAtual.push({ role: 'model', content: resultado.resposta, timestamp: Date.now() });
+    }
+    sessaoParaSalvar.historico = historicoAtual.slice(-16);
+    await redisService.salvarSessao(chaveCanonica, sessaoParaSalvar);
+
+    if (resultado.enviarLogo && logoBase64 && whatsappAdapter?.enviarImagemUniversal) {
       registrarEnvioBot(chaveCanonica, resultado.resposta);
-
-      let envioRes = null;
-      if (resultado.tipoBotoes === 'PAGAMENTO') {
-        const botoes = [
-          { id: 'btn_pix', label: '💠 Pix' },
-          { id: 'btn_cartao', label: '💳 Cartão na Entrega' },
-          { id: 'btn_dinheiro', label: '💵 Dinheiro' },
-        ];
-        if (whatsappAdapter && typeof whatsappAdapter.enviarBotoesUniversal === 'function') {
-          envioRes = await whatsappAdapter.enviarBotoesUniversal(destinoEnvio, resultado.resposta, botoes);
-        } else {
-          envioRes = await enviarMensagemWhatsApp(destinoEnvio, resultado.resposta);
-        }
-      } else if (resultado.tipoBotoes === 'CONFIRMACAO') {
-        const botoes = [
-          { id: 'btn_confirmar', label: '✅ Confirmar Pedido' },
-          { id: 'btn_ajustar', label: '✏️ Ajustar Itens' },
-        ];
-        if (whatsappAdapter && typeof whatsappAdapter.enviarBotoesUniversal === 'function') {
-          envioRes = await whatsappAdapter.enviarBotoesUniversal(destinoEnvio, resultado.resposta, botoes);
-        } else {
-          envioRes = await enviarMensagemWhatsApp(destinoEnvio, resultado.resposta);
-        }
-      } else {
-        envioRes = await enviarMensagemWhatsApp(destinoEnvio, resultado.resposta);
-      }
-
+      await whatsappAdapter.enviarImagemUniversal(destinoEnvio, logoBase64, resultado.resposta);
+    } else if (resultado.resposta) {
+      registrarEnvioBot(chaveCanonica, resultado.resposta);
+      const envioRes = await enviarMensagemWhatsApp(destinoEnvio, resultado.resposta, resultado.tipoBotoes);
       const sentMsgId = envioRes?.messageId || envioRes?.key?.id || envioRes?.id || null;
       if (sentMsgId) {
         registrarEnvioBot(chaveCanonica, null, sentMsgId);
       }
     }
 
+    if (resultado.enviarLocalizacao && whatsappAdapter?.enviarLocalizacaoUniversal) {
+      await whatsappAdapter.enviarLocalizacaoUniversal(destinoEnvio).catch(() => {});
+    }
+
     if (supabaseService && typeof supabaseService.registrarConversa === 'function') {
       supabaseService
         .registrarConversa({
           clienteTelefone: telefoneReal || chaveCanonica,
-          nomeCliente: nomeCliente || perfilCliente?.nome || null,
+          nomeCliente: nomeCliente || sessaoAtiva.clienteNome || perfilCliente?.nome || null,
           mensagemCliente: textoConsolidado,
-          tipoMensagem: pacote.meta.isAudio ? 'audio' : 'texto',
+          tipoMensagem: isAudio ? 'audio' : 'texto',
           respostaIA: resultado.resposta || '',
           tempoRespostaMs: Date.now() - inicioMs,
         })
         .catch(() => {});
     }
 
-    if (resultado.transbordoHumano) {
-      pausasAtendimentoHumano.set(chaveCanonica, Date.now() + TEMPO_PAUSA_HUMANA_MS);
-      await redisService.ativarPausa(chaveCanonica, TEMPO_PAUSA_HUMANA_MS / 1000);
-      console.log(`[app] Transbordo humano acionado para ${chaveCanonica}. Bot pausado por 30 min.`);
+    if (resultado.transbordoHumano || resultado.pausaSegundos) {
+      await redisService.ativarPausa(chaveCanonica, resultado.pausaSegundos || TEMPO_PAUSA_HUMANA_SEG);
     }
 
     if (resultado.pedidoFechado) {
       await finalizarPedidoEDespachar({
         chaveCanonica,
+        destinoEnvio,
         telefoneReal,
-        nomeCliente,
+        nomeCliente: nomeCliente || sessaoAtiva.clienteNome,
         dadosPedido: resultado.dadosPedido,
         respostaIA: resultado.resposta,
       });
     }
   } finally {
-    processamentoEmAndamento.delete(chaveCanonica);
+    await redisService.liberarLock(chaveCanonica);
+  }
+}
 
-    if (filaPendentePosLock.has(chaveCanonica)) {
-      const proximo = filaPendentePosLock.get(chaveCanonica);
-      filaPendentePosLock.delete(chaveCanonica);
-      buffersDebounce.set(chaveCanonica, {
-        mensagens: proximo.mensagens,
-        meta: proximo.meta,
-        timer: null,
-      });
-      executarTurnoConsolidado(chaveCanonica).catch((err) => {
-        console.error(`[app] Erro ao drenar fila pós-lock de ${chaveCanonica}:`, err);
-      });
+async function tratarComandoOperacional(texto, destinoEnvio) {
+  const lower = texto.toLowerCase().trim();
+
+  if (lower.startsWith('#falta ') || lower.startsWith('#esgotado ')) {
+    const itens = texto.replace(/^#(falta|esgotado)\s+/i, '').split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean);
+    for (const item of itens) await redisService.adicionarFalta(item);
+    await enviarMensagemWhatsApp(destinoEnvio, `🚨 *Esgotado no balcão:*\n${itens.map((i) => `• ${i}`).join('\n')}`);
+    return true;
+  }
+
+  if (lower.startsWith('#tem ') || lower.startsWith('#chegou ') || lower.startsWith('#disponivel ') || lower.startsWith('#disponível ')) {
+    const itens = texto.replace(/^#(tem|chegou|dispon[ií]vel)\s+/i, '').split(/[,;\n]+/).map((s) => s.trim()).filter(Boolean);
+    for (const item of itens) await redisService.removerFalta(item);
+    await enviarMensagemWhatsApp(destinoEnvio, `✅ *Liberado no balcão:*\n${itens.map((i) => `• ${i}`).join('\n')}`);
+    return true;
+  }
+
+  if (lower.startsWith('#preco ') || lower.startsWith('#preço ')) {
+    const resto = texto.replace(/^#pre[cç]o\s+/i, '').trim();
+    const match = resto.match(/^(.*)\s+([0-9]+(?:[.,][0-9]{1,2})?)$/);
+    if (match) {
+      const nomeItem = match[1].trim();
+      const valor = Number(match[2].replace(',', '.'));
+      await redisService.salvarPrecoOverride(nomeItem, valor);
+      await enviarMensagemWhatsApp(
+        destinoEnvio,
+        `🏷️ *Preço atualizado hoje:*\n• *${nomeItem}*: R$ ${valor.toFixed(2).replace('.', ',')}`
+      );
+      return true;
     }
   }
+
+  if (lower === '#falta' || lower === '#esgotados' || lower === '#estoque') {
+    const lista = await redisService.listarFaltas();
+    const msg = lista.length > 0
+      ? `📋 *ITENS EM FALTA HOJE:*\n${lista.map((i) => `• ${i}`).join('\n')}\n\n_Para liberar: #disponivel [corte]_`
+      : '✅ *Nenhum item em falta no balcão hoje!*';
+    await enviarMensagemWhatsApp(destinoEnvio, msg);
+    return true;
+  }
+
+  if (lower === '#fechamento') {
+    await executarFechamentoExpediente();
+    return true;
+  }
+
+  return false;
 }
 
 app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => {
@@ -498,11 +512,8 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
     if (!normalizado) return;
 
     if (normalizado.messageId) {
-      const jaProcessada = await redisService.verificarEDeduplicarMensagem(normalizado.messageId);
-      if (jaProcessada || mensagensProcessadasIds.has(normalizado.messageId)) {
-        return;
-      }
-      mensagensProcessadasIds.set(normalizado.messageId, Date.now());
+      const duplicada = await redisService.verificarEDeduplicarMensagem(normalizado.messageId);
+      if (duplicada) return;
     }
 
     const { chaveCanonica, destinoEnvio, telefoneReal } = await resolverIdentificadorUnificado(
@@ -512,33 +523,80 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
 
     if (!chaveCanonica) return;
 
-    if (normalizado.fromMe) {
-      const textoOperador = String(normalizado.text || '').trim();
+    const textoRecebido = String(normalizado.text || '').trim();
 
-      if (foiEnviadoPeloBot(chaveCanonica, textoOperador, normalizado.messageId)) {
+    if (normalizado.isChatPropriaLoja || textoRecebido.startsWith('#')) {
+      if (foiEnviadoPeloBot(chaveCanonica, textoRecebido, normalizado.messageId)) {
         return;
       }
 
-      if (textoOperador.toLowerCase() === '#bot') {
-        pausasAtendimentoHumano.delete(chaveCanonica);
+      if (textoRecebido.toLowerCase() === '#bot' || textoRecebido.toLowerCase() === '#ativar') {
+        await redisService.removerPausa(chaveCanonica);
+        return;
+      }
+
+      if (textoRecebido.startsWith('#')) {
+        const okCmd = await tratarComandoOperacional(textoRecebido, destinoEnvio);
+        if (okCmd) return;
+      }
+
+      if (normalizado.isImage && normalizado.base64Image) {
+        const msgCalibracao = await visaoComandosService.iniciarCalibracaoPorFoto(
+          chaveCanonica,
+          normalizado.base64Image,
+          textoRecebido
+        );
+        registrarEnvioBot(chaveCanonica, msgCalibracao);
+        await enviarMensagemWhatsApp(destinoEnvio, msgCalibracao);
+        return;
+      }
+
+      if (normalizado.isChatPropriaLoja && textoRecebido) {
+        const respConfirmacao = await visaoComandosService.processarConfirmacaoVision(
+          chaveCanonica,
+          textoRecebido
+        );
+        if (respConfirmacao) {
+          registrarEnvioBot(chaveCanonica, respConfirmacao);
+          await enviarMensagemWhatsApp(destinoEnvio, respConfirmacao);
+          return;
+        }
+      }
+    }
+
+    if (normalizado.fromMe) {
+      if (foiEnviadoPeloBot(chaveCanonica, textoRecebido, normalizado.messageId)) {
+        return;
+      }
+
+      if (textoRecebido.toLowerCase() === '#bot' || textoRecebido.toLowerCase() === '#ativar') {
         await redisService.removerPausa(chaveCanonica);
         console.log(`[app] Bot reativado manualmente via #bot para ${chaveCanonica}.`);
         return;
       }
 
-      pausasAtendimentoHumano.set(chaveCanonica, Date.now() + TEMPO_PAUSA_HUMANA_MS);
-      await redisService.ativarPausa(chaveCanonica, TEMPO_PAUSA_HUMANA_MS / 1000);
+      await redisService.ativarPausa(chaveCanonica, TEMPO_PAUSA_HUMANA_SEG);
       console.log(`[app] Intervenção humana detectada para ${chaveCanonica}. Bot pausado por 30 min.`);
       return;
     }
 
-    const emPausaRedis = await redisService.estaEmPausa(chaveCanonica);
-    const emPausaMemoria = (pausasAtendimentoHumano.get(chaveCanonica) || 0) > Date.now();
-    if (emPausaRedis || emPausaMemoria) {
+    const motivoBloqueio = isMensagemFornecedorOuRobo(textoRecebido, normalizado.pushName);
+    if (motivoBloqueio) {
+      await redisService.ativarPausa(chaveCanonica, 3600);
       return;
     }
 
-    let textoFinal = normalizado.text || '';
+    if (await redisService.estaEmPausa(chaveCanonica)) {
+      return;
+    }
+
+    if (normalizado.messageId && whatsappAdapter?.marcarMensagemComoLida) {
+      setTimeout(() => {
+        whatsappAdapter.marcarMensagemComoLida(destinoEnvio, normalizado.messageId).catch(() => {});
+      }, 2000).unref();
+    }
+
+    let textoFinal = textoRecebido;
     if (normalizado.isAudio && normalizado.base64Audio) {
       const transcricao = await transcreverAudioSeguro(
         normalizado.base64Audio,
@@ -549,76 +607,28 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
 
     if (!textoFinal) return;
 
-    const nomeCliente = normalizado.pushName || '';
+    await redisService.adicionarBufferMensagem(chaveCanonica, {
+      texto: textoFinal,
+      destinoEnvio,
+      telefoneReal,
+      nomeCliente: normalizado.pushName || '',
+      isAudio: Boolean(normalizado.isAudio),
+    });
 
-    const existente = buffersDebounce.get(chaveCanonica);
-    if (existente) {
-      clearTimeout(existente.timer);
-      existente.mensagens.push(textoFinal);
-      existente.meta.destinoEnvio = destinoEnvio || existente.meta.destinoEnvio;
-      if (nomeCliente) existente.meta.nomeCliente = nomeCliente;
-      if (normalizado.isAudio) existente.meta.isAudio = true;
-    } else {
-      buffersDebounce.set(chaveCanonica, {
-        mensagens: [textoFinal],
-        meta: {
-          destinoEnvio,
-          telefoneReal,
-          nomeCliente,
-          isAudio: Boolean(normalizado.isAudio),
-        },
-        timer: null,
-      });
+    if (timersDebounceLocais.has(chaveCanonica)) {
+      clearTimeout(timersDebounceLocais.get(chaveCanonica));
     }
 
-    const entradaAtual = buffersDebounce.get(chaveCanonica);
-    entradaAtual.timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       executarTurnoConsolidado(chaveCanonica).catch((err) => {
         console.error(`[app] Erro ao processar turno de ${chaveCanonica}:`, err);
       });
     }, TEMPO_DEBOUNCE_MS);
+    timersDebounceLocais.set(chaveCanonica, timer);
   } catch (err) {
     console.error('[app] Erro inesperado no webhook:', err);
   }
 });
-
-// ============================================================================
-// ENDPOINTS DE FALTAS DE BALCÃO
-// ============================================================================
-app.get('/api/balcao/faltas', autenticarWorkerInterno, async (req, res) => {
-  try {
-    const faltas = await redisService.listarFaltas();
-    res.json({ ok: true, faltas });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/balcao/faltas', autenticarWorkerInterno, async (req, res) => {
-  try {
-    const { item } = req.body || {};
-    if (!item) return res.status(400).json({ error: 'Item obrigatório' });
-    await redisService.adicionarFalta(item);
-    res.json({ ok: true, mensagem: `Falta adicionada: ${item}` });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.delete('/api/balcao/faltas', autenticarWorkerInterno, async (req, res) => {
-  try {
-    const { item } = req.body || {};
-    if (!item) return res.status(400).json({ error: 'Item obrigatório' });
-    await redisService.removerFalta(item);
-    res.json({ ok: true, mensagem: `Falta removida: ${item}` });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// ============================================================================
-// ENDPOINTS DE IMPRESSÃO TÉRMICA E PDV (CAIXA 1) PROTEGIDOS POR INTERNAL_API_KEY
-// ============================================================================
 
 app.get('/api/impressao/proximo', autenticarWorkerInterno, async (req, res) => {
   try {
@@ -663,6 +673,29 @@ app.post('/api/impressao/status', autenticarWorkerInterno, async (req, res) => {
   }
 });
 
+app.post('/api/pesagem/ean13', autenticarWorkerInterno, async (req, res) => {
+  try {
+    const { barcode, codigoPedido, telefoneCliente } = req.body || {};
+    const resultado = await pesagemPixService.processarEtiquetaPesagemEan13({
+      barcode,
+      codigoPedido,
+      telefoneCliente,
+    });
+    res.json(resultado);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/expediente/fechamento', autenticarWorkerInterno, async (req, res) => {
+  try {
+    const resumo = await executarFechamentoExpediente();
+    res.json(resumo);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/worker-caixa1.ps1', autenticarWorkerInterno, (req, res) => {
   const workerFile = path.resolve(__dirname, '../../scripts/worker_impressao_caixa1.ps1');
   if (fs.existsSync(workerFile)) {
@@ -676,8 +709,6 @@ app.post('/api/conversa/despausar', autenticarWorkerInterno, async (req, res) =>
   const { telefone } = req.body || {};
   if (telefone) {
     const limpo = String(telefone).trim();
-    pausasAtendimentoHumano.delete(limpo);
-    pausasAtendimentoHumano.delete(limpo.replace(/\D/g, ''));
     await redisService.removerPausa(limpo);
     await redisService.removerPausa(limpo.replace(/\D/g, ''));
     return res.json({ ok: true, mensagem: `Conversa ${limpo} despausada com sucesso.` });
@@ -685,14 +716,11 @@ app.post('/api/conversa/despausar', autenticarWorkerInterno, async (req, res) =>
   res.status(400).json({ error: 'Telefone obrigatório' });
 });
 
-// Rota de saúde para monitoramento (Railway / Docker / Uptime)
 app.get('/health', (req, res) => {
   res.status(200).json({
     status: 'online',
     loja: process.env.NOME_LOJA || 'Açougue e Mercearia Coisas da Roça',
     redisConectado: redisService.isRedisConectado(),
-    sessoesAtivas: historicoSessoes.size,
-    pausasHumanasAtivas: pausasAtendimentoHumano.size,
     timestamp: new Date().toISOString(),
   });
 });

@@ -1,3 +1,9 @@
+/**
+ * ADAPTADOR UNIVERSAL DE WHATSAPP GATEWAY (W-API PRO / EVOLUTION) - COISAS DA ROÇA
+ * IMPORTANTE: Nenhuma função ou parâmetro de rejeição de chamadas (rejectCalls) é utilizado.
+ * Chamadas telefônicas no chip físico da loja tocam normalmente.
+ */
+
 const GATEWAY_TYPE = (process.env.WHATSAPP_GATEWAY_TYPE || 'WAPI').toUpperCase();
 const WAPI_BASE_URL = (process.env.WAPI_BASE_URL || 'https://api.w-api.app/v1').replace(/\/$/, '');
 const WAPI_INSTANCE_ID = process.env.WAPI_INSTANCE_ID || '';
@@ -6,6 +12,24 @@ const WAPI_TOKEN = process.env.WAPI_TOKEN || '';
 const EVOLUTION_URL = (process.env.EVOLUTION_API_URL || 'http://localhost:8080').replace(/\/$/, '');
 const EVOLUTION_KEY = process.env.EVOLUTION_API_KEY || '';
 const EVOLUTION_INSTANCE = process.env.EVOLUTION_INSTANCE_NAME || 'coisasdaroca_balcao';
+
+const LOJA_PADRAO_LOCALIZACAO = {
+  latitude: -22.3789,
+  longitude: -41.7832,
+  name: 'Açougue e Mercearia Coisas da Roça',
+  address: 'Rua Ferreira Viana, 136 - Centro, Macaé/RJ',
+};
+
+function normalizarJid(jidOrPhone) {
+  if (!jidOrPhone) return '';
+  const str = String(jidOrPhone).trim();
+  if (/@lid/i.test(str) || /@s\.whatsapp\.net/i.test(str) || /@g\.us/i.test(str)) {
+    return str;
+  }
+  const apenasNumeros = str.replace(/[^0-9]/g, '');
+  if (!apenasNumeros) return str;
+  return `${apenasNumeros}@s.whatsapp.net`;
+}
 
 function formatarDestinoGateway(target) {
   const raw = String(target || '').trim();
@@ -40,6 +64,99 @@ async function lerRespostaGatewaySegura(res, contexto) {
     throw new Error(`[${contexto}] HTTP ${res.status}: ${rawText.slice(0, 200)}`);
   }
   return parsed;
+}
+
+/**
+ * Envia indicador de presença ('composing' ou 'recording') com timeout de 4s.
+ * Falhas nunca travam o fluxo principal.
+ */
+async function enviarPresencaUniversal(to, presence = 'composing') {
+  const destino = formatarDestinoGateway(to);
+  if (!destino || GATEWAY_TYPE !== 'WAPI' || !WAPI_INSTANCE_ID || !WAPI_TOKEN) return false;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
+
+  try {
+    const url = `${WAPI_BASE_URL}/chat/send-presence?instanceId=${WAPI_INSTANCE_ID}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${WAPI_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        phone: destino,
+        presence: presence === 'recording' ? 'recording' : 'composing',
+        delay: 3000,
+      }),
+      signal: controller.signal,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Marca mensagem recebida como lida (tique azul humanizado).
+ */
+async function marcarMensagemComoLida(to, messageId) {
+  const destino = formatarDestinoGateway(to);
+  if (!destino || !messageId || GATEWAY_TYPE !== 'WAPI' || !WAPI_INSTANCE_ID || !WAPI_TOKEN) {
+    return false;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
+
+  try {
+    const url = `${WAPI_BASE_URL}/chat/mark-message-as-read?instanceId=${WAPI_INSTANCE_ID}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${WAPI_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ phone: destino, messageId }),
+      signal: controller.signal,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
+ * Consulta nome/perfil do contato na W-API quando o pushName vier ausente.
+ */
+async function obterDadosContato(to) {
+  const destino = formatarDestinoGateway(to);
+  if (!destino || destino.includes('@lid') || GATEWAY_TYPE !== 'WAPI' || !WAPI_INSTANCE_ID || !WAPI_TOKEN) {
+    return null;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
+
+  try {
+    const url = `${WAPI_BASE_URL}/contact/fetch-contact?instanceId=${WAPI_INSTANCE_ID}&phone=${encodeURIComponent(destino)}`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${WAPI_TOKEN}` },
+      signal: controller.signal,
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function enviarTextoUniversal(telefone, texto) {
@@ -84,6 +201,109 @@ async function enviarTextoUniversal(telefone, texto) {
   }
 }
 
+/**
+ * Envia imagem (base64 ou URL) com fallback automático para texto caso a imagem falhe.
+ */
+async function enviarImagemUniversal(telefone, base64OuUrl, caption = '') {
+  const destino = formatarDestinoGateway(telefone);
+  if (!destino) return null;
+  if (!base64OuUrl) {
+    return caption ? enviarTextoUniversal(telefone, caption) : null;
+  }
+
+  if (GATEWAY_TYPE === 'WAPI' && WAPI_INSTANCE_ID && WAPI_TOKEN) {
+    const publicBase = (process.env.PUBLIC_URL || 'https://coisasdaroca-core-production.up.railway.app').replace(/\/$/, '');
+    const candidatos = /^https?:\/\//i.test(base64OuUrl)
+      ? [base64OuUrl]
+      : [
+          `${publicBase}/assets/logo_coisas_da_roca.jpg`,
+          base64OuUrl,
+          String(base64OuUrl).replace(/^data:image\/[a-z0-9+.-]+;base64,/i, ''),
+        ];
+
+    for (const imgPayload of candidatos) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000);
+      try {
+        const url = `${WAPI_BASE_URL}/message/send-image?instanceId=${WAPI_INSTANCE_ID}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${WAPI_TOKEN}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ phone: destino, image: imgPayload, caption }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeout);
+        if (res.ok) {
+          return await lerRespostaGatewaySegura(res, 'WAPI send-image');
+        }
+      } catch (err) {
+        clearTimeout(timeout);
+        console.warn('[WAPI Imagem] Tentativa falhou:', err.message);
+      }
+    }
+  }
+
+  if (caption) {
+    return enviarTextoUniversal(telefone, caption);
+  }
+  return null;
+}
+
+/**
+ * Envia pino de localização da loja no WhatsApp com fallback automático para link do Google Maps.
+ */
+async function enviarLocalizacaoUniversal(to, loc = {}) {
+  const destino = formatarDestinoGateway(to);
+  if (!destino) return null;
+
+  const latitude = loc.latitude ?? LOJA_PADRAO_LOCALIZACAO.latitude;
+  const longitude = loc.longitude ?? LOJA_PADRAO_LOCALIZACAO.longitude;
+  const name = loc.name || LOJA_PADRAO_LOCALIZACAO.name;
+  const address = loc.address || LOJA_PADRAO_LOCALIZACAO.address;
+
+  if (GATEWAY_TYPE === 'WAPI' && WAPI_INSTANCE_ID && WAPI_TOKEN) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const url = `${WAPI_BASE_URL}/message/send-location?instanceId=${WAPI_INSTANCE_ID}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${WAPI_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          phone: destino,
+          latitude,
+          longitude,
+          name,
+          address,
+        }),
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        return await lerRespostaGatewaySegura(res, 'WAPI send-location');
+      }
+    } catch (err) {
+      console.warn('[WAPI Location] Fallback para link de localização:', err.message);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  const mapsLink = `https://www.google.com/maps/search/?api=1&query=${latitude},${longitude}`;
+  return enviarTextoUniversal(
+    to,
+    `📍 *${name}*\n${address}\nMapa: ${mapsLink}`
+  );
+}
+
+/**
+ * Envia botões interativos com fallback gracioso para opções numéricas.
+ */
 async function enviarBotoesUniversal(telefone, texto, botoes = [], rodape = 'Coisas da Roça • Macaé/RJ') {
   const destino = formatarDestinoGateway(telefone);
   if (!destino || !texto) return null;
@@ -117,15 +337,13 @@ async function enviarBotoesUniversal(telefone, texto, botoes = [], rodape = 'Coi
       if (res.ok) {
         return await lerRespostaGatewaySegura(res, 'WAPI send-button-actions');
       }
-      console.warn(`[WAPI Botoes] HTTP ${res.status}, aplicando fallback para texto.`);
     } catch (err) {
-      console.warn('[WAPI Botoes] Falha no envio interativo, aplicando fallback para texto:', err.message);
+      console.warn('[WAPI Botoes] Aplicando fallback para texto:', err.message);
     } finally {
       clearTimeout(timeout);
     }
   }
 
-  // Fallback gracioso em texto limpo numerado
   const opcoesTexto = botoes
     .slice(0, 3)
     .map((b, idx) => `*${idx + 1}* - ${b.label || b.texto}`)
@@ -133,34 +351,56 @@ async function enviarBotoesUniversal(telefone, texto, botoes = [], rodape = 'Coi
   return enviarTextoUniversal(telefone, `${texto}\n\n${opcoesTexto}`);
 }
 
-async function enviarImagemUniversal(telefone, base64OuUrl, caption = '') {
-  const destino = formatarDestinoGateway(telefone);
-  if (!destino || !base64OuUrl) return null;
+/**
+ * Envia menu em lista (List Message) com fallback para lista de marcadores bullet (•).
+ */
+async function enviarListaUniversal(to, { title = '', description = '', buttonText = 'Ver opções', sections = [] } = {}) {
+  const destino = formatarDestinoGateway(to);
+  if (!destino) return null;
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 12000);
-
-  try {
-    if (GATEWAY_TYPE === 'WAPI') {
-      if (!WAPI_INSTANCE_ID || !WAPI_TOKEN) {
-        throw new Error('Credenciais WAPI_INSTANCE_ID / WAPI_TOKEN não configuradas.');
-      }
-      const url = `${WAPI_BASE_URL}/message/send-image?instanceId=${WAPI_INSTANCE_ID}`;
+  if (GATEWAY_TYPE === 'WAPI' && WAPI_INSTANCE_ID && WAPI_TOKEN && Array.isArray(sections) && sections.length > 0) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const url = `${WAPI_BASE_URL}/message/send-list?instanceId=${WAPI_INSTANCE_ID}`;
       const res = await fetch(url, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${WAPI_TOKEN}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ phone: destino, image: base64OuUrl, caption }),
+        body: JSON.stringify({
+          phone: destino,
+          title,
+          description,
+          buttonText,
+          sections,
+        }),
         signal: controller.signal,
       });
-      return await lerRespostaGatewaySegura(res, 'WAPI send-image');
+      if (res.ok) {
+        return await lerRespostaGatewaySegura(res, 'WAPI send-list');
+      }
+    } catch (err) {
+      console.warn('[WAPI Lista] Aplicando fallback bullet list:', err.message);
+    } finally {
+      clearTimeout(timeout);
     }
-    return null;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  const linhas = [];
+  if (title) linhas.push(`*${title}*`);
+  if (description) linhas.push(description);
+
+  for (const sec of sections || []) {
+    if (sec.title) linhas.push(`\n*${sec.title}*`);
+    for (const row of sec.rows || []) {
+      const desc = row.description ? ` — ${row.description}` : '';
+      linhas.push(`• *${row.title}*${desc}`);
+    }
+  }
+
+  return enviarTextoUniversal(to, linhas.join('\n').trim());
 }
 
 async function baixarMidiaWAPI(mediaObj, tipo = 'audio') {
@@ -266,7 +506,7 @@ async function normalizarPayloadWebhook(reqBody) {
       : (reqBody.chat?.id || reqBody.sender?.phone || reqBody.sender?.id || reqBody.senderLid || reqBody.phone || '');
 
     if (lojaNum && String(rawTarget).replace(/[^0-9]/g, '') === lojaNum) {
-      rawTarget = reqBody.chat?.id || reqBody.sender?.id || reqBody.senderLid || '';
+      rawTarget = reqBody.chat?.id || reqBody.sender?.id || reqBody.senderLid || rawTarget;
     }
 
     const replyTarget = formatarDestinoGateway(rawTarget);
@@ -281,10 +521,22 @@ async function normalizarPayloadWebhook(reqBody) {
     const audioObj = msgContent.audioMessage || reqBody.data?.message?.audioMessage || null;
     const text = extrairTextoDePayload(msgContent, reqBody, imageObj);
 
+    const isAudio = Boolean(audioObj || reqBody.isAudio || ['audio', 'ptt'].includes(reqBody.type));
+    const isImage = Boolean(imageObj || reqBody.isImage || reqBody.type === 'image');
+
+    let base64Image = imageObj?.base64 || null;
+    // Baixa imagem se for comando com # ou se for mensagem enviada pelo celular Master da loja (Diogo)
+    const isChatPropriaLoja = lojaNum && replyTarget.replace(/\D/g, '') === lojaNum;
+    if (isImage && !base64Image && imageObj && (text.toLowerCase().startsWith('#') || fromMe || isChatPropriaLoja)) {
+      base64Image = (await baixarMidiaWAPI(imageObj, 'image')) || imageObj.jpegThumbnail || null;
+    }
+
     if (fromMe) {
       return {
         origem: 'WAPI',
         fromMe: true,
+        isChatPropriaLoja,
+        lojaNum,
         messageId,
         replyTarget,
         sessionKey,
@@ -292,23 +544,17 @@ async function normalizarPayloadWebhook(reqBody) {
         senderPhone,
         senderLid,
         text,
+        isImage,
+        base64Image,
       };
     }
-
-    const isAudio = Boolean(audioObj || reqBody.isAudio || ['audio', 'ptt'].includes(reqBody.type));
-    const isImage = Boolean(imageObj || reqBody.isImage || reqBody.type === 'image');
 
     let base64Audio = audioObj?.base64 || reqBody.base64 || reqBody.audioBase64 || null;
     if (isAudio && !base64Audio && audioObj) {
       base64Audio = await baixarMidiaWAPI(audioObj, 'audio');
     }
 
-    let base64Image = imageObj?.base64 || null;
-    if (isImage && !base64Image && imageObj && text.toLowerCase().startsWith('#')) {
-      base64Image = (await baixarMidiaWAPI(imageObj, 'image')) || imageObj.jpegThumbnail || null;
-    }
-
-    const pushName =
+    let pushName =
       reqBody.sender?.pushName ||
       reqBody.sender?.name ||
       reqBody.senderName ||
@@ -316,11 +562,18 @@ async function normalizarPayloadWebhook(reqBody) {
       reqBody.pushName ||
       '';
 
+    if (!pushName && replyTarget && !replyTarget.includes('@lid')) {
+      const dadosContato = await obterDadosContato(replyTarget);
+      pushName = dadosContato?.name || dadosContato?.pushName || '';
+    }
+
     if (!text && !base64Audio && !isImage) return null;
 
     return {
       origem: 'WAPI',
       fromMe: false,
+      isChatPropriaLoja,
+      lojaNum,
       messageId,
       replyTarget,
       sessionKey,
@@ -350,11 +603,15 @@ async function normalizarPayloadWebhook(reqBody) {
 
     const messageId = msgData.key?.id || reqBody.messageId || reqBody.id || null;
     const text = extrairTextoDePayload(msgData.message || {}, reqBody, msgData.message?.imageMessage);
+    const isImage = Boolean(msgData.messageType === 'imageMessage' || reqBody.type === 'image');
+    const base64Image = msgData.message?.base64 || null;
 
     if (fromMe) {
       return {
         origem: 'EVOLUTION',
         fromMe: true,
+        isChatPropriaLoja: false,
+        lojaNum: '',
         messageId,
         replyTarget,
         sessionKey,
@@ -362,13 +619,14 @@ async function normalizarPayloadWebhook(reqBody) {
         senderPhone: '',
         senderLid: '',
         text,
+        isImage,
+        base64Image,
       };
     }
 
     const isAudio = Boolean(
       msgData.messageType === 'audioMessage' || reqBody.type === 'audio' || reqBody.type === 'ptt'
     );
-    const isImage = Boolean(msgData.messageType === 'imageMessage' || reqBody.type === 'image');
     const base64Audio = msgData.message?.base64 || reqBody.base64 || null;
     const pushName = msgData.pushName || reqBody.pushName || reqBody.senderName || '';
 
@@ -377,6 +635,8 @@ async function normalizarPayloadWebhook(reqBody) {
     return {
       origem: 'EVOLUTION',
       fromMe: false,
+      isChatPropriaLoja: false,
+      lojaNum: '',
       messageId,
       replyTarget,
       sessionKey,
@@ -388,7 +648,7 @@ async function normalizarPayloadWebhook(reqBody) {
       isAudio,
       isImage,
       base64Audio,
-      base64Image: null,
+      base64Image,
     };
   }
 
@@ -396,9 +656,15 @@ async function normalizarPayloadWebhook(reqBody) {
 }
 
 module.exports = {
+  normalizarJid,
+  enviarPresencaUniversal,
+  marcarMensagemComoLida,
+  obterDadosContato,
   enviarTextoUniversal,
-  enviarBotoesUniversal,
   enviarImagemUniversal,
+  enviarLocalizacaoUniversal,
+  enviarBotoesUniversal,
+  enviarListaUniversal,
   normalizarPayloadWebhook,
   baixarMidiaWAPI,
   formatarDestinoGateway,

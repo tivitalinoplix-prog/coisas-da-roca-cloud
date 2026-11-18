@@ -142,6 +142,8 @@ function sanitizarRespostaWhatsApp(texto = '') {
   out = out.replace(/\[PEDIDO_FECHADO\]/gi, '');
   out = out.replace(/\[BOTOES_PAGAMENTO\]/gi, '');
   out = out.replace(/\[BOTOES_CONFIRMACAO\]/gi, '');
+  out = out.replace(/\[ENVIAR_LOCALIZACAO\]/gi, '');
+  out = out.replace(/~\s*R\$/gi, 'R$');
   out = out.replace(/.*(inst[aâ]ncia de teste|ambiente de homologa[cç][aã]o|aten[cç][aã]o:\s*inst[aâ]ncia).*\n?/gi, '');
   out = out.replace(/```(?:json)?[\s\S]*?(?:```|$)/gi, '');
   out = out.replace(/\*\*(.*?)\*\*/g, '*$1*');
@@ -221,6 +223,7 @@ function extrairMetadadosResposta(textoBruto = '', sessaoAtual = {}) {
   const transbordoHumano = /\[TRANSBORDO_ATENDENTE\]/i.test(bruto);
   const pedidoFechadoTag = /\[PEDIDO_FECHADO\]/i.test(bruto);
 
+  const enviarLocalizacao = /\[ENVIAR_LOCALIZACAO\]/i.test(bruto);
   let tipoBotoes = null;
   if (/\[BOTOES_PAGAMENTO\]/i.test(bruto)) tipoBotoes = 'PAGAMENTO';
   else if (/\[BOTOES_CONFIRMACAO\]/i.test(bruto)) tipoBotoes = 'CONFIRMACAO';
@@ -269,6 +272,7 @@ function extrairMetadadosResposta(textoBruto = '', sessaoAtual = {}) {
     textoCliente: sanitizarRespostaWhatsApp(bruto),
     transbordoHumano,
     pedidoFechado,
+    enviarLocalizacao,
     dadosPedido,
     sessaoAtualizada,
     tipoBotoes,
@@ -302,28 +306,39 @@ Fale como um balconista de confiança: direto, simpático e enxuto (15 a 35 pala
 ${regraSaudacao}
 
 ====================================================================
+TIPOGRAFIA NATIVA DO WHATSAPP (OBRIGATÓRIA PARA LIMPEZA VISUAL)
+====================================================================
+- *Negrito* (1 asterisco de cada lado, NUNCA dois): nomes de produtos, preços, totais e títulos de bloco.
+- _Itálico_ (underline): observações de corte/preparo e nota da balança.
+- > Citação (sinal > seguido de espaço): use para envolver os blocos de > *Resumo do Pedido* e > *Resumo Final*.).
+- ~Tachado~ (til): use APENAS quando o cliente remover ou trocar um item (ex: • ~1kg de Costela~ _(removido)_).
+- NUNCA coloque o símbolo til (~) antes de R$ (pois o WhatsApp confunde com texto tachado e polui a leitura; exiba o valor limpo *R$ 55,99*).
+- \`Monoespaçado\` (crase): use exclusivamente no código do pedido fechado (ex: \`Pedido #314\`).
+
+====================================================================
 ESTADO ATUAL DO CARRINHO PERSISTIDO NO REDIS (NUNCA ESQUEÇA ESTES DADOS)
 ====================================================================
 ${estadoCarrinhoJson}
 
 REGRAS DO CARRINHO MULTI-TURN (TOLERÂNCIA ZERO À AMNÉSIA):
-1. SEMPRE preserve os itens já listados no ESTADO ATUAL DO CARRINHO acima. Se o cliente mandar apenas o endereço ou forma de pagamento nesta mensagem, MANTENHA todos os itens intactos e mostre o resumo atualizado!
+1. SEMPRE preserve os itens já listados no ESTADO ATUAL DO CARRINHO acima. Se o cliente mandar apenas o endereço ou forma de pagamento nesta mensagem, MANTENHA todos os itens intactos e mostre o resumo atualizado! dentro de bloco > *Resumo do Pedido*!
 2. PREÇO UNITÁRIO + TOTAL OBRIGATÓRIO: Em todo item listado, exiba o preço por kg/un do SGM junto ao subtotal:
-   • *2kg - Patinho Bovino* (R$ 55,99/kg — 1kg moído + 1kg picado) — *~R$ 111,98*
+   > *Resumo do Pedido*
+   • *2kg - Patinho Bovino* (R$ 55,99/kg — 1kg moído + 1kg picado) — *R$ 111,98*
 3. NOTA DE BALANÇA: Quando houver item por KG, coloque UMA única vez abaixo do subtotal:
    _Valores das carnes são estimados; o valor exato sai na balança com o cupom._
 4. ANCORAGEM NO SGM: Use EXCLUSIVAMENTE produtos e preços do CATÁLOGO SGM abaixo. Nunca invente marcas ou valores.
 5. ÁGUA MINERAL 20L: Sempre priorize e informe primeiro o preço do *Refil/Reposição* (troca do galão vazio) antes do galão completo, e pergunte se o cliente já possui o vasilhame vazio para troca.
-6. ENDEREÇO COMPLETO: Para entrega em Macaé, exija *Rua, Número e Bairro* (nunca aceite só "Macaé"). Se pedir retirada no balcão, aceite normalmente.
+6. ENDEREÇO COMPLETO E LOCALIZAÇÃO: Para entrega em Macaé, exija *Rua, Número e Bairro* (nunca aceite só "Macaé"). Se o cliente pedir o endereço ou localização da loja para retirada, informe e adicione [ENVIAR_LOCALIZACAO].
 7. BOTÕES INTERATIVOS:
    - Se já tem os itens e o endereço, mas falta apenas a forma de pagamento, pergunte a forma de pagamento e adicione [BOTOES_PAGAMENTO] ao final.
-   - Se já tem itens, endereço completo e forma de pagamento, mostre o resumo limpo e peça confirmação para enviar ao balcão, adicionando [BOTOES_CONFIRMACAO] ao final.
+   - Se já tem itens, endereço completo e forma de pagamento, mostre o > *Resumo do Pedido* limpo e peça confirmação para enviar ao balcão, adicionando [BOTOES_CONFIRMACAO] ao final.
 8. ITEM AUSENTE OU ESGOTADO: Se o item não existir no SGM ou estiver na lista de esgotados, avise com naturalidade que vai confirmar no balcão e adicione [TRANSBORDO_ATENDENTE].
 
 ====================================================================
 SAÍDA ESTRUTURADA OBRIGATÓRIA EM TODO TURNO (INVISÍVEL AO CLIENTE)
 ====================================================================
-Sempre termine sua resposta com o bloco abaixo contendo o estado completo e acumulado (mesmo que o pedido ainda esteja em andamento). Quando o cliente confirmar o fechamento ("ok", "pode fechar", "confirmar", "1") com itens + endereço completo + pagamento, adicione também [PEDIDO_FECHADO]:
+Sempre termine sua resposta com o bloco abaixo contendo o estado completo e acumulado (mesmo que o pedido ainda esteja em andamento). Quando o cliente confirmar o fechamento ("ok", "pode fechar", "confirmar", "1") com itens + endereço completo + pagamento, gere um código de 3 dígitos em crase (ex: \`Pedido #314\`) no > *Resumo Final* e adicione [PEDIDO_FECHADO]]:
 
 <ESTADO_CARRINHO_JSON>
 {
@@ -431,6 +446,7 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
       transbordoHumano: det.tipo === 'HUMANO',
       pausaSegundos: det.pausaSegundos,
       pedidoFechado: false,
+      enviarLocalizacao: false,
       dadosPedido: null,
       sessaoAtualizada: sessaoAtiva,
       enviarLogo: false,
@@ -445,6 +461,7 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
       resposta: montarMensagemBoasVindas(nomeCliente, perfilCliente),
       transbordoHumano: false,
       pedidoFechado: false,
+      enviarLocalizacao: false,
       dadosPedido: null,
       sessaoAtualizada: { ...sessaoAtiva, boasVindasEnviada: true },
       enviarLogo: true,
@@ -505,6 +522,7 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
       resposta: metadados.textoCliente,
       transbordoHumano: metadados.transbordoHumano,
       pedidoFechado: metadados.pedidoFechado,
+      enviarLocalizacao: metadados.enviarLocalizacao,
       dadosPedido: metadados.dadosPedido,
       sessaoAtualizada: metadados.sessaoAtualizada,
       enviarLogo: false,
@@ -518,6 +536,7 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
         'Tive uma instabilidade rápida aqui no balcão. Já chamei uma atendente para continuar seu pedido por aqui!',
       transbordoHumano: true,
       pedidoFechado: false,
+      enviarLocalizacao: false,
       dadosPedido: null,
       sessaoAtualizada: sessaoAtiva,
       enviarLogo: false,
