@@ -285,7 +285,72 @@ function formatarCatalogoParaPrompt(produtos = []) {
 async function sincronizarSgmComSupabase() {
   const lista = carregarCatalogo(true);
   return { ok: true, totalProdutos: lista.length };
+}async function atualizarCatalogoSgm(produtos = []) {
+  const listaNormalizada = (Array.isArray(produtos) ? produtos : [])
+    .filter((item) => item && (item.codigo !== undefined || item.nome))
+    .map((item) => {
+      const precoNum = Number(String(item.preco ?? item.valor ?? 0).replace(',', '.'));
+      return {
+        codigo: String(item.codigo ?? '').trim(),
+        nome: String(item.nome ?? item.descricao ?? '').trim(),
+        preco: Number.isFinite(precoNum) ? precoNum : 0,
+        unidade: String(item.unidade ?? 'KG').trim().toUpperCase() || 'KG',
+        categoria: item.categoria ? String(item.categoria).trim() : null,
+        ativo: item.ativo !== false,
+      };
+    });
+
+  try {
+    const dataDir = path.join(__dirname, '..', '..', 'data');
+    if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'produtos.json'), JSON.stringify(listaNormalizada, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('[produtosService] Falha ao salvar snapshot data/produtos.json:', err.message);
+  }
+
+  cacheCatalogo = null;
+
+  let dbUpserted = 0;
+  try {
+    let db = null;
+    for (const p of ['../config/db', '../db', '../database/db', '../config/database']) {
+      try { db = require(p); break; } catch (_) {}
+    }
+    if (db && db.pool && listaNormalizada.length > 0) {
+      const client = await db.pool.connect();
+      try {
+        await client.query('BEGIN');
+        const chunkSize = 200;
+        for (let i = 0; i < listaNormalizada.length; i += chunkSize) {
+          const lote = listaNormalizada.slice(i, i + chunkSize);
+          const valores = [];
+          const placeholders = lote.map((prod, idx) => {
+            const base = idx * 6;
+            valores.push(prod.codigo, prod.nome, prod.preco, prod.unidade, prod.categoria, prod.ativo);
+            return `($${base + 1}, $${base + 2}, $${base + 3}, $${base + 4}, $${base + 5}, $${base + 6})`;
+          });
+          await client.query(
+            `INSERT INTO produtos (codigo, nome, preco, unidade, categoria, ativo) VALUES ${placeholders.join(', ')} ON CONFLICT (codigo) DO UPDATE SET nome = EXCLUDED.nome, preco = EXCLUDED.preco, unidade = EXCLUDED.unidade, categoria = EXCLUDED.categoria, ativo = EXCLUDED.ativo`,
+            valores
+          );
+          dbUpserted += lote.length;
+        }
+        await client.query('COMMIT');
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+  } catch (err) {
+    console.warn('[produtosService] Falha ao fazer upsert no banco (nao fatal):', err.message);
+  }
+
+  return { ok: true, totalProdutos: listaNormalizada.length, dbUpserted };
 }
+
+
 
 module.exports = {
   normalizarTexto,
@@ -295,4 +360,5 @@ module.exports = {
   buscarProdutosRelevantes,
   formatarCatalogoParaPrompt,
   sincronizarSgmComSupabase,
+  atualizarCatalogoSgm,
 };
