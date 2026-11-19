@@ -313,7 +313,7 @@ async function sincronizarSgmComSupabase() {
   let dbUpserted = 0;
   try {
     let db = null;
-    for (const p of ['../config/db', '../db', '../database/db', '../config/database']) {
+    for (const p of ['../database', '../config/db', '../db', '../database/db', '../config/database']) {
       try { db = require(p); break; } catch (_) {}
     }
     if (db && db.pool && listaNormalizada.length > 0) {
