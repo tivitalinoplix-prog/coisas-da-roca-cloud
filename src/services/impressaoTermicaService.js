@@ -67,32 +67,8 @@ function montarComandaEscPos(pedido) {
 
   escpos += COMANDOS.INIT;
 
-  // =========================================================================
-  // VIA 1: PRODUÇÃO / BANCADA DE CORTE (FONTE GRANDE LEGÍVEL A 2 METROS)
-  // =========================================================================
-  appendTexto('COISAS DA ROCA - VIA 1 (CORTE/PRODUCAO)', 'CENTER', true, 'DOUBLE_HEIGHT');
-  appendTexto('================================================', 'CENTER', false, 'NORMAL');
-  appendTexto(`PEDIDO #${pedido.pedidoId}   |   ${dataHora}`, 'LEFT', true, 'DOUBLE_HEIGHT');
-  appendTexto(`CLIENTE: ${pedido.clienteNome}`, 'LEFT', true, 'DOUBLE_HEIGHT');
-  appendTexto('------------------------------------------------', 'CENTER', false, 'NORMAL');
-
-  (pedido.itens || []).forEach((item, idx) => {
-    const desc = `${idx + 1}. ${sanitizarParaTermica(item.descricao)}`;
-    const qtdStr = sanitizarParaTermica(item.quantidade || '1 un');
-    appendTexto(formatarLinhaDupla(desc, qtdStr, 48), 'LEFT', true, 'DOUBLE_HEIGHT');
-    if (item.preparo) {
-      appendTexto(`   >> CORTE: ${sanitizarParaTermica(item.preparo)}`, 'LEFT', true, 'DOUBLE_HEIGHT');
-    }
-  });
-
-  appendTexto('================================================', 'CENTER', false, 'NORMAL');
-  escpos += '\n\n';
-  escpos += COMANDOS.CUT_PARTIAL;
-
-  // =========================================================================
-  // VIA 2: CAIXA 1 / EXPEDIÇÃO E MOTOBOY
-  // =========================================================================
-  appendTexto('COISAS DA ROCA - VIA 2 (CAIXA / ENTREGA)', 'CENTER', true, 'DOUBLE_HEIGHT');
+  // VIA ÚNICA: CAIXA / BALCÃO / EXPEDIÇÃO (ÁREA LIVRE DE ESCRITA)
+  appendTexto('COISAS DA ROCA - PEDIDO WHATSAPP', 'CENTER', true, 'DOUBLE_HEIGHT');
   appendTexto('================================================', 'CENTER', false, 'NORMAL');
   appendTexto(`PEDIDO : #${pedido.pedidoId}`, 'LEFT', true, 'DOUBLE_HEIGHT');
   appendTexto(`DATA   : ${dataHora}`, 'LEFT', false, 'NORMAL');
@@ -107,19 +83,22 @@ function montarComandaEscPos(pedido) {
     const qtdStr = sanitizarParaTermica(item.quantidade || '1 un');
     appendTexto(formatarLinhaDupla(desc, qtdStr, 48), 'LEFT', true, 'NORMAL');
     if (item.preparo) {
-      appendTexto(`   Obs: ${sanitizarParaTermica(item.preparo)}`, 'LEFT', false, 'NORMAL');
+      appendTexto(`   >> CORTE/OBS: ${sanitizarParaTermica(item.preparo)}`, 'LEFT', true, 'NORMAL');
     }
   });
 
   appendTexto('------------------------------------------------', 'CENTER', false, 'NORMAL');
-  appendTexto('CONFERENCIA BALANCA / ETIQUETA EAN-13:', 'LEFT', true, 'NORMAL');
-  appendTexto('[ ] Peso Real: __________ Valor Final R$: _______', 'LEFT', false, 'NORMAL');
-  appendTexto('[ ] Motoboy  : __________ Rubrica: ______________', 'LEFT', false, 'NORMAL');
+  appendTexto('PESO REAL: _______________  VALOR R$: __________', 'LEFT', true, 'NORMAL');
+appendTexto('', 'LEFT', false, 'NORMAL');
+appendTexto('ANOTACOES LIVRES:', 'LEFT', true, 'NORMAL');
+appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
+appendTexto('', 'LEFT', false, 'NORMAL');
+appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
+appendTexto('', 'LEFT', false, 'NORMAL');
+appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
   appendTexto('================================================', 'CENTER', false, 'NORMAL');
 
-  escpos += '\n\n\n';
-  escpos += COMANDOS.BEEP;
-  escpos += COMANDOS.CUT_FULL;
+  escpos += '\n\n\n' + COMANDOS.CUT_FULL;
 
   return escpos;
 }
