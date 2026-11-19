@@ -250,7 +250,7 @@ function mesclarEstadoSessao(sessaoAtual = {}, delta = null) {
   return base;
 }
 
-function extrairMetadadosResposta(textoBruto = '', sessaoAtual = {}), opcoes = {} {
+function extrairMetadadosResposta(textoBruto = '', sessaoAtual = {}, opcoes = {}) {
   const bruto = String(textoBruto || '');
 
   const transbordoHumano = /\[TRANSBORDO_ATENDENTE\]/i.test(bruto);
@@ -649,7 +649,7 @@ produtosConsultados: [],
     const metadados = extrairMetadadosResposta(respostaBruta, {
       ...sessaoAtiva,
       boasVindasEnviada: true,
-    }), opcoes;
+    }, opcoes);
 
     return {
       resposta: metadados.textoCliente,
