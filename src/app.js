@@ -9,6 +9,7 @@ const redisService = require('./services/redisService');
 const visaoComandosService = require('./services/visaoComandosService');
 const pesagemPixService = require('./services/pesagemPixService');
 const { executarFechamentoExpediente } = require('./services/fechamentoExpedienteService');
+const produtosService = require('./services/produtosService');
 
 let db = null;
 try {
@@ -806,13 +807,18 @@ app.post('/api/automacao/ativar', autenticarWorkerInterno, (req, res) => {
   console.log('▶️ [app] Automação ATIVADA GLOBALMENTE via endpoint /api/automacao/ativar');
   res.json({ ok: true, pausado: false, mensagem: 'Automação de atendimento ativada com sucesso.' });
 });
+app.post('/api/produtos/sync', autenticarWorkerInterno, async (req, res) => { try { const lista = req.body.produtos || req.body; const resultado = await produtosService.atualizarCatalogoSgm(lista); res.json({ success: true, ...resultado }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } });
+app.get('/api/produtos/catalogo', autenticarWorkerInterno, (req, res) => { try { const lista = produtosService.carregarCatalogo(); res.json({ success: true, total: lista.length }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } });
+app.get('/api/impressao/proximo', autenticarWorkerInterno, (req, res) => { res.json({ success: true, job: null }); });
+app.post('/api/impressao/status', autenticarWorkerInterno, (req, res) => { res.json({ success: true, ok: true }); });
 
 app.get('/health', (req, res) => {
   res.status(200).json({
-    status: 'online',
+    status: 'ok',
     loja: process.env.NOME_LOJA || 'Açougue e Mercearia Coisas da Roça',
     redisConectado: redisService.isRedisConectado(),
-    automacaoPausada: isAutomacaoPausadaGlobal(),
+    bancoConectado: Boolean(db && db.pool),
+    automacoesPausadas: process.env.AUTOMACOES_PAUSADAS === 'true',
     timestamp: new Date().toISOString(),
   });
 });
