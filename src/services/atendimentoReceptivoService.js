@@ -56,22 +56,22 @@ function selecionarModelosSwarm(textoMensagem = '', contexto = []) {
   const tamanhoContexto = Array.isArray(contexto) ? contexto.length : (Array.isArray(contexto?.itens) ? contexto.itens.length : 0);
 
   if (temMultiplosPesos || temTrocaOuRevisao || isFotoListaOuAudioLongo || tamanhoContexto >= 4) {
-    console.log('[Swarm Router] Turno COMPLEXO -> Maestro (gemini-4-hydrogen / gemini-2.5-flash)');
+    console.log('[Swarm Router] Turno COMPLEXO -> Maestro (gemini-4-hydrogen / gemini-3.5-flash-lite)');
     return [
       process.env.GEMINI_MODEL_MAESTRO || 'gemini-4-hydrogen',
-      'gemini-3.8-flash',
       'gemini-3.5-flash-lite',
-      'gemini-2.5-flash',
-      'gemini-2.0-flash',
+      'gemini-3-flash-preview',
+      'gemini-3.8-flash',
+      'gemini-1.5-flash',
     ];
   }
-  console.log('[Swarm Router] Turno PADRÃO -> Executor Rápido (gemini-3.8-flash / gemini-2.0-flash)');
+  console.log('[Swarm Router] Turno PADRÃO -> Executor Rápido (gemini-3.5-flash-lite / gemini-3-flash-preview)');
   return [
-    process.env.GEMINI_MODEL_EXECUTOR || 'gemini-3.8-flash',
-    'gemini-3.5-flash-lite',
+    process.env.GEMINI_MODEL_EXECUTOR || 'gemini-3.5-flash-lite',
+    'gemini-3-flash-preview',
+    'gemini-3.8-flash',
     'gemini-4-hydrogen',
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
+    'gemini-1.5-flash',
   ];
 }
 
@@ -848,41 +848,32 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
  */
 async function extrairListaComprasClienteVision(base64Image, apiKey = null) {
   if (!base64Image) return null;
-  try {
-    const { GoogleGenerativeAI } = require('@google/generative-ai');
-    const ai = apiKey ? new GoogleGenerativeAI(apiKey) : new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-    const model = ai.getGenerativeModel({ model: 'gemini-2.5-flash' });
-    const cleanBase64 = base64Image.replace(/^data:image\/[a-z0-9]+;base64,/i, '');
-    const result = await model.generateContent({
-      contents: [{
-        role: 'user',
-        parts: [
-          { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } },
-          { text: 'Transcreva fielmente todos os itens e quantidades desta lista de compras de açougue/mercearia enviada pelo cliente. Retorne apenas os itens em texto simples separados por linhas.' }
-        ]
-      }]
-    });
-    return result.response.text().trim() || null;
-  } catch (e) {
+  const modelosVision = ['gemini-4-hydrogen', 'gemini-3.5-flash-lite', 'gemini-3-flash-preview', 'gemini-3.8-flash'];
+  const cleanBase64 = base64Image.replace(/^data:image\/[a-z0-9]+;base64,/i, '');
+  const keyToUse = apiKey || process.env.GEMINI_API_KEY || '';
+
+  const { GoogleGenerativeAI } = require('@google/generative-ai');
+  const ai = new GoogleGenerativeAI(keyToUse);
+
+  for (const modNome of modelosVision) {
     try {
-      const { GoogleGenerativeAI } = require('@google/generative-ai');
-      const ai = apiKey ? new GoogleGenerativeAI(apiKey) : new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
-      const modelFallback = ai.getGenerativeModel({ model: 'gemini-1.5-flash' });
-      const cleanBase64 = base64Image.replace(/^data:image\/[a-z0-9]+;base64,/i, '');
-      const result = await modelFallback.generateContent({
+      const model = ai.getGenerativeModel({ model: modNome });
+      const result = await model.generateContent({
         contents: [{
           role: 'user',
           parts: [
             { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } },
-            { text: 'Transcreva fielmente todos os itens e quantidades desta lista de compras de açougue/mercearia enviada pelo cliente.' }
+            { text: 'Transcreva fielmente todos os itens e quantidades desta lista de compras de açougue/mercearia enviada pelo cliente. Retorne apenas os itens em texto simples separados por linhas.' }
           ]
         }]
       });
-      return result.response.text().trim() || null;
-    } catch (_) {
-      return null;
+      const txt = result.response.text().trim();
+      if (txt) return txt;
+    } catch (eMod) {
+      console.warn(`[Vision OCR] Modelo ${modNome} falhou:`, eMod.message);
     }
   }
+  return null;
 }
 
 module.exports = {

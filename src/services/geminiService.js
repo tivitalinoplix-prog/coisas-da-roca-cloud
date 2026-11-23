@@ -13,7 +13,12 @@ if (fs.existsSync(dictPath)) {
 }
 
 async function processarAudioComGemini(base64Audio, clienteTelefone, apiKey) {
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+  const modelosAudio = [
+    process.env.GEMINI_MODEL_EXECUTOR || 'gemini-3.5-flash-lite',
+    'gemini-3-flash-preview',
+    'gemini-3.8-flash',
+    'gemini-4-hydrogen'
+  ];
 
   const promptSystem = `Você é o Principal Especialista de Balcão e Ingestão Multimodal do Açougue e Mercearia Coisas da Roça (Macaé/RJ).
 Sua missão é ouvir este áudio enviado por uma cliente tradicional/dona de casa, transcrever com absoluta fidelidade e extrair os dados em formato JSON estrito.
@@ -66,15 +71,23 @@ Responda APENAS com um objeto JSON válido (sem markdown, sem backticks):
     }
   };
 
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(requestBody)
-  });
-
-  const data = await response.json();
-  const rawText = data.candidates[0].content.parts[0].text;
-  return JSON.parse(rawText);
+  for (const mod of modelosAudio) {
+    try {
+      const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${mod}:generateContent?key=${apiKey}`;
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      });
+      if (!response.ok) continue;
+      const data = await response.json();
+      const rawText = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (rawText) {
+        return JSON.parse(rawText);
+      }
+    } catch (_) {}
+  }
+  return null;
 }
 
 async function lerListaComprasImagem(imageUrl) {
@@ -99,7 +112,7 @@ async function lerListaComprasImagem(imageUrl) {
 
     if (!base64Img) return '';
 
-    for (const mod of ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']) {
+    for (const mod of ['gemini-4-hydrogen', 'gemini-3.5-flash-lite', 'gemini-3-flash-preview', 'gemini-3.8-flash']) {
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${mod}:generateContent?key=${apiKey}`;
         const r = await fetch(url, {
