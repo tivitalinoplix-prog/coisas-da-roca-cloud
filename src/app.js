@@ -427,6 +427,7 @@ async function executarTurnoConsolidado(chaveCanonica) {
       nomeCliente: nomeCliente || sessaoAtiva.clienteNome || perfilCliente?.nome || '',
       perfilCliente,
       faltasBalcao,
+      telefoneReal,
     });
 
     if (await redisService.estaEmPausa(chaveCanonica)) {

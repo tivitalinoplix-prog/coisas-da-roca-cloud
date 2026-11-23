@@ -615,6 +615,7 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
     nomeCliente = '',
     perfilCliente = null,
     faltasBalcao = [],
+    telefoneReal = '',
   } = opcoes;
 
   // Compatibilidade: aceita tanto objeto sessaoAtiva (Redis) quanto array de histórico legado
@@ -756,7 +757,7 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
 
   const aberto = isHorarioComercialAberto();
   const testador = redisService && typeof redisService.isNumeroTestador === 'function'
-    ? redisService.isNumeroTestador(telefoneReal || '')
+    ? redisService.isNumeroTestador(telefoneReal || sessaoAtiva.clienteTelefone || '')
     : false;
   const isForaDeExpediente = !aberto && !testador;
 
