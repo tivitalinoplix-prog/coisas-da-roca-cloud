@@ -574,7 +574,8 @@ async function chamarGeminiComResiliencia(systemInstruction, contents, modelosPr
 
     for (const modelName of modelos) {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 22000);
+      const timeoutMs = modelName.includes("hydrogen") ? 10500 : 15000;
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
       try {
         const model = genAI.getGenerativeModel({

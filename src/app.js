@@ -62,6 +62,81 @@ try {
   console.warn('[app] cronService.js indisponível:', e.message);
 }
 
+
+// === [PENTE-FINO NEON: PROTEÇÃO DE EQUIPE POR TELEFONE & GATILHO NATURAL 🖨️] ===
+const cacheImpressoesHumanas = new Map(); // chave -> timestampMs (idempotência de 3 min)
+
+function carregarTelefonesEquipeInterna() {
+  const sufixos = new Set([
+    '997621921', // Fixo Balcão ACR
+    '999766763', // Diogo Farah
+    '999554125', // Mara Rocha
+    '999496704', // Mara Marinho
+    '999959331', // Rosilda
+    '998548251', // Rosângela
+    '998315708', // Antônio Açougueiro (Didi)
+    '998123102', // Zeca
+    '997477271', // Taiza Franco
+    '992762730', // Iasmyn Carvalho
+    '981133427', // Patrick
+    '992449963', // Bruno Funcionário ACR
+    '988154186', // Jussara (Balcão)
+    '992676855', // Zé Mário (Entregador)
+    '997935518', // Entregador 5518
+    '998021154', // Gabriel Souza (DAM Suporte)
+    '999884222', // Marciano
+  ]);
+  try {
+    const p = path.resolve(__dirname, '../../config/contatos_especiais.json');
+    if (fs.existsSync(p)) {
+      const cfg = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      for (const [tel, dados] of Object.entries(cfg)) {
+        if (dados && dados.auto_responder === false) {
+          const limpo = String(tel).replace(/\D/g, '');
+          if (limpo.length >= 8) sufixos.add(limpo.slice(-8));
+        }
+      }
+    }
+  } catch (_) {}
+  return sufixos;
+}
+
+const SUFIXOS_EQUIPE_8_DIGITOS = carregarTelefonesEquipeInterna();
+
+/**
+ * Bloqueia EXCLUSIVAMENTE pelo sufixo numérico de 8 dígitos do telefone da equipe.
+ * NUNCA bloqueia pelo primeiro nome (pushName) para não silenciar clientes homônimos!
+ */
+function isContatoEquipePorTelefone(identificador = '') {
+  const digitos = String(identificador || '').replace(/@.*$/, '').replace(/\D/g, '');
+  if (digitos.length < 8 || digitos.length > 13) return false;
+  // Exceção explícita para o número de testes do Txai (998586180) e VIP Fome de Churrasco (991042115)
+  const ultimos8 = digitos.slice(-8);
+  if (ultimos8 === '98586180' || ultimos8 === '91042115') return false;
+  return SUFIXOS_EQUIPE_8_DIGITOS.has(ultimos8);
+}
+
+/**
+ * Detecta se a atendente humana enviou o Gatilho Natural de Impressão ("Pedido confirmado!", "Pedido anotado!")
+ * com trava de idempotência de 3 minutos para nunca duplicar cupom na Bematech.
+ */
+function isGatilhoNaturalImpressaoHumana(texto = '', chaveSessao = '') {
+  const t = String(texto || '').trim();
+  if (!t || t.length > 140) return false;
+  const bateuFrase = /\b(pedido\s+confirmado|otimo,?\s*pedido\s+confirmado|ótimo,?\s*pedido\s+confirmado|pedido\s+anotado)\b/i.test(t);
+  if (!bateuFrase) return false;
+
+  const agora = Date.now();
+  const ultima = cacheImpressoesHumanas.get(chaveSessao) || 0;
+  if (agora - ultima < 3 * 60 * 1000) {
+    console.log(`[Idempotência Impressão Humana] Ignorando gatilho repetido em <3min para ${chaveSessao}`);
+    return false;
+  }
+  cacheImpressoesHumanas.set(chaveSessao, agora);
+  return true;
+}
+// === [FIM PENTE-FINO NEON] ===
+
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '25mb' }));
@@ -626,12 +701,30 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
 
     if (!chaveCanonica) return;
 
-    if (isContatoEquipeOuBloqueado(chaveCanonica, telefoneReal)) {
+    const textoRecebido = String(normalizado.text || '').trim();
+
+    // 1. Comandos com '#' têm prioridade e podem ser enviados livremente pela equipe (#falta, #tem, #ligar, etc.)
+    if (textoRecebido.startsWith('#')) {
+      if (foiEnviadoPeloBot(chaveCanonica, textoRecebido, normalizado.messageId)) {
+        return;
+      }
+
+      const lowerCmd = textoRecebido.toLowerCase();
+      if (lowerCmd === '#bot' || lowerCmd === '#ativar' || lowerCmd === '#ligar' || lowerCmd === '#despausar') {
+        await redisService.removerPausa(chaveCanonica);
+        await enviarMensagemWhatsApp(destinoEnvio, '🤖 *Automação Coisas da Roça religada com sucesso!* Pode conversar normalmente.');
+        return;
+      }
+
+      const okCmd = await tratarComandoOperacional(textoRecebido, destinoEnvio);
+      if (okCmd) return;
+    }
+
+    // 2. Proteção de equipe estritamente por telefone (nunca silencia clientes homônimos pelo nome)
+    if (isContatoEquipePorTelefone(chaveCanonica) || isContatoEquipePorTelefone(telefoneReal)) {
       console.log(`[app] 👥 Contato de EQUIPE detectado (${chaveCanonica} / ${telefoneReal}). Automação receptiva desativada.`);
       return;
     }
-
-    const textoRecebido = String(normalizado.text || '').trim();
 
     if (normalizado.isChatPropriaLoja || textoRecebido.startsWith('#')) {
       if (foiEnviadoPeloBot(chaveCanonica, textoRecebido, normalizado.messageId)) {
@@ -680,9 +773,12 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
       }
 
       const isComandoManual = textoRecebido.toLowerCase().startsWith('#imprimir') || textoRecebido.toLowerCase().startsWith('#comanda');
-      const isFechamentoNatural = /(pedido\s+confirmado|confirmar\s+pedido|pedido\s+anotado|comanda\s+enviada)/i.test(textoRecebido);
+      const isFechamentoNatural = isGatilhoNaturalImpressaoHumana(textoRecebido, chaveCanonica);
 
       if (isComandoManual || isFechamentoNatural) {
+        if (typeof enviarReacaoUniversal === 'function' && normalizado.messageId) {
+          enviarReacaoUniversal(destinoEnvio || chaveCanonica, normalizado.messageId, '🖨️').catch(() => {});
+        }
         const payloadManual = isComandoManual ? textoRecebido.replace(/^#(imprimir|comanda)\s*/i, '').trim() : '';
         console.log(`[app] 🖨️ Disparo de comanda do atendente (${isFechamentoNatural ? 'frase natural' : 'comando manual'}) para ${chaveCanonica}: "${payloadManual}"`);
         try {

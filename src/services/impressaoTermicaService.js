@@ -46,6 +46,20 @@ function formatarLinhaDupla(colunaEsquerda, colunaDireita, larguraMaxima = 48) {
   return `${esq}${' '.repeat(espacos)}${dir}`;
 }
 
+
+function isItemPesavelKg(item = {}) {
+  const nome = String(item.descricao || item.nome || '').toLowerCase();
+  const un = String(item.unidade || item.quantidade || '').toLowerCase();
+  // Água 20L, galão, refrigerante, carvão, arroz, azeite, pacote, bandeja fechada ou UN não levam linha de PESO REAL
+  if (/\b(agua|água|galao|galão|20l|refrigerante|coca|guarana|guaraná|cerveja|heineken|carvao|carvão|arroz|feijao|feijão|azeite|oleo|óleo|macarrao|macarrão|farinha|acucar|açúcar|cafe|café|leite|biscoito|pao de alho|pão de alho)\b/i.test(nome)) {
+    return false;
+  }
+  if (/\b(un|und|unid|pct|pacote|cx|caixa|lt|litro|garrafa|lata|fardo)\b/i.test(un) && !/\b(kg|quilo|kilo|g|gr|gramas)\b/i.test(un)) {
+    return false;
+  }
+  return true;
+}
+
 function montarComandaEscPos(pedido) {
   let escpos = '';
   const appendTexto = (txt, align = 'LEFT', bold = false, size = 'NORMAL') => {
@@ -89,14 +103,22 @@ function montarComandaEscPos(pedido) {
   });
 
   (pedido.itens || []).forEach((item, idx) => {
-    const desc = `${idx + 1}. ${sanitizarParaTermica(item.descricao)}`;
-    const qtdStr = sanitizarParaTermica(item.quantidade || '1 un');
-    appendTexto(formatarLinhaDupla(desc, qtdStr, 48), 'LEFT', true, 'NORMAL');
-    if (item.preparo) {
-      const isCarne = /(carne|bife|moida|moída|alcatra|contra|frango|linguica|linguiça|costela|picanha|bovino|suino|suíno)/i.test(item.descricao || '') ||
-                      /(bife|moer|cortar|limpar|iscas|picadinho|cubos|peca|peça)/i.test(item.preparo || '');
-      const rotulo = isCarne ? '>> CORTE/OBS:' : '>> OBS:';
-      appendTexto(`   ${rotulo} ${sanitizarParaTermica(item.preparo)}`, 'LEFT', true, 'NORMAL');
+    const nomeItem = item.descricao || item.nome || 'Item';
+    const desc = `${idx + 1}. ${sanitizarParaTermica(nomeItem)}`;
+    const un = item.unidade && !String(item.quantidade || '').toUpperCase().includes(String(item.unidade).toUpperCase())
+      ? ` ${item.unidade}`
+      : '';
+    const qtdStr = sanitizarParaTermica(`${item.quantidade || 1}${un}`);
+    appendTexto(formatarLinhaDupla(desc, qtdStr, 48), 'LEFT', true, 'DOUBLE_HEIGHT');
+
+    const pesavel = isItemPesavelKg(item);
+    const prep = item.preparo || item.observacao_corte || item.obs;
+    if (prep && !/^(padrao|padrão|conferir|normal)$/i.test(String(prep).trim())) {
+      const prefixo = pesavel ? '>> Preparo' : '>> OBS';
+      appendTexto(`   ${prefixo}: ${sanitizarParaTermica(prep)}`, 'LEFT', false, 'NORMAL');
+    }
+    if (pesavel) {
+      appendTexto('   PESO REAL: ___________  VALOR R$: ___________', 'LEFT', false, 'NORMAL');
     }
   });
 
@@ -226,6 +248,7 @@ async function confirmarImpressaoJob(id) {
 }
 
 module.exports = {
+  isItemPesavelKg,
   sanitizarParaTermica,
   montarComandaEscPos,
   montarFitaFechamentoEscPos,
