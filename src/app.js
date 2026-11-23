@@ -4,7 +4,7 @@ const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
 
-const { processarMensagemReceptiva } = require('./services/atendimentoReceptivoService');
+const { processarMensagemReceptiva, extrairListaComprasClienteVision } = require('./services/atendimentoReceptivoService');
 const redisService = require('./services/redisService');
 const visaoComandosService = require('./services/visaoComandosService');
 const pesagemPixService = require('./services/pesagemPixService');
@@ -586,8 +586,10 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
         return;
       }
 
-      if (textoRecebido.toLowerCase() === '#bot' || textoRecebido.toLowerCase() === '#ativar') {
+      const lowerCmd = textoRecebido.toLowerCase();
+      if (lowerCmd === '#bot' || lowerCmd === '#ativar' || lowerCmd === '#ligar' || lowerCmd === '#despausar') {
         await redisService.removerPausa(chaveCanonica);
+        await enviarMensagemWhatsApp(destinoEnvio, '🤖 *Automação Coisas da Roça religada com sucesso!* Pode conversar normalmente.');
         return;
       }
 
@@ -672,10 +674,19 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
       return;
     }
 
-    if (normalizado.messageId && whatsappAdapter?.marcarMensagemComoLida) {
-      setTimeout(() => {
-        whatsappAdapter.marcarMensagemComoLida(destinoEnvio, normalizado.messageId).catch(() => {});
-      }, 2000).unref();
+    if (normalizado.messageId && whatsappAdapter) {
+      if (typeof whatsappAdapter.marcarMensagemComoLida === 'function') {
+        setTimeout(() => {
+          whatsappAdapter.marcarMensagemComoLida(destinoEnvio, normalizado.messageId).catch(() => {});
+        }, 1500).unref();
+      }
+      if (typeof whatsappAdapter.enviarReacaoUniversal === 'function') {
+        whatsappAdapter.enviarReacaoUniversal(destinoEnvio, normalizado.messageId, '📝').catch(() => {});
+      }
+    }
+
+    if (whatsappAdapter && typeof whatsappAdapter.enviarPresencaUniversal === 'function') {
+      whatsappAdapter.enviarPresencaUniversal(destinoEnvio, 'composing').catch(() => {});
     }
 
     let textoFinal = textoRecebido;
@@ -687,15 +698,20 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
       textoFinal = textoFinal ? `${textoFinal}\n${transcricao}` : transcricao;
     }
 
-    if (normalizado.isImage && geminiService && typeof geminiService.lerListaComprasImagem === 'function') {
+    if (normalizado.isImage) {
       try {
-        const urlImg = normalizado.imageUrl || (normalizado.base64Image ? `data:image/jpeg;base64,${normalizado.base64Image}` : null);
-        if (urlImg) {
-          const listaOcr = await geminiService.lerListaComprasImagem(urlImg);
-          if (listaOcr) {
-            const prefixo = `[Foto de lista de compras enviada pelo cliente]:\n${listaOcr}`;
-            textoFinal = textoFinal ? `${textoFinal}\n${prefixo}` : prefixo;
+        let listaOcr = null;
+        if (typeof extrairListaComprasClienteVision === 'function' && normalizado.base64Image) {
+          listaOcr = await extrairListaComprasClienteVision(normalizado.base64Image);
+        } else if (geminiService && typeof geminiService.lerListaComprasImagem === 'function') {
+          const urlImg = normalizado.imageUrl || (normalizado.base64Image ? `data:image/jpeg;base64,${normalizado.base64Image}` : null);
+          if (urlImg) {
+            listaOcr = await geminiService.lerListaComprasImagem(urlImg);
           }
+        }
+        if (listaOcr) {
+          const prefixo = `[Foto de lista de compras enviada pelo cliente]:\n${listaOcr}`;
+          textoFinal = textoFinal ? `${textoFinal}\n${prefixo}` : prefixo;
         }
       } catch (errOcr) {
         console.warn('[app] Falha ao processar OCR de lista de compras:', errOcr.message);
@@ -861,6 +877,29 @@ app.post('/api/conversa/despausar', autenticarWorkerInterno, async (req, res) =>
     return res.json({ ok: true, mensagem: `Conversa ${limpo} despausada com sucesso.` });
   }
   res.status(400).json({ error: 'Telefone obrigatório' });
+});
+
+app.post('/api/conversa/religar-tudo', async (req, res) => {
+  try {
+    pausaGlobalMemoria = false;
+    let totalPausas = 0;
+    const redis = redisService.obterClienteRedis ? redisService.obterClienteRedis() : null;
+    if (redis && typeof redis.keys === 'function') {
+      const chaves = await redis.keys('pausa:*');
+      if (chaves && chaves.length > 0) {
+        await redis.del(...chaves);
+        totalPausas = chaves.length;
+      }
+    }
+    console.log(`[app] 🟢 Automação religada para todas as conversas! Pausas limpas: ${totalPausas}`);
+    return res.json({
+      ok: true,
+      mensagem: `Automação religada com sucesso! ${totalPausas} pausas removidas do Redis.`,
+      pausasRemovidas: totalPausas,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/sessao/reset', autenticarWorkerInterno, async (req, res) => {

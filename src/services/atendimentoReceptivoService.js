@@ -843,6 +843,48 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
   }
 }
 
+/**
+ * Transcreve foto de lista de compras enviada pelo cliente usando Gemini Vision
+ */
+async function extrairListaComprasClienteVision(base64Image, apiKey = null) {
+  if (!base64Image) return null;
+  try {
+    const { GoogleGenerativeAI } = require('@google/generative-ai');
+    const ai = apiKey ? new GoogleGenerativeAI(apiKey) : new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+    const model = ai.getGenerativeModel({ model: 'gemini-2.5-flash' });
+    const cleanBase64 = base64Image.replace(/^data:image\/[a-z0-9]+;base64,/i, '');
+    const result = await model.generateContent({
+      contents: [{
+        role: 'user',
+        parts: [
+          { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } },
+          { text: 'Transcreva fielmente todos os itens e quantidades desta lista de compras de açougue/mercearia enviada pelo cliente. Retorne apenas os itens em texto simples separados por linhas.' }
+        ]
+      }]
+    });
+    return result.response.text().trim() || null;
+  } catch (e) {
+    try {
+      const { GoogleGenerativeAI } = require('@google/generative-ai');
+      const ai = apiKey ? new GoogleGenerativeAI(apiKey) : new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+      const modelFallback = ai.getGenerativeModel({ model: 'gemini-1.5-flash' });
+      const cleanBase64 = base64Image.replace(/^data:image\/[a-z0-9]+;base64,/i, '');
+      const result = await modelFallback.generateContent({
+        contents: [{
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: 'image/jpeg', data: cleanBase64 } },
+            { text: 'Transcreva fielmente todos os itens e quantidades desta lista de compras de açougue/mercearia enviada pelo cliente.' }
+          ]
+        }]
+      });
+      return result.response.text().trim() || null;
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
 module.exports = {
   ENDERECO_OFICIAL_LOJA,
   verificarExpedienteLojaBRT,
@@ -853,4 +895,5 @@ module.exports = {
   sanitizarRespostaWhatsApp,
   extrairMetadadosResposta,
   processarMensagemReceptiva,
+  extrairListaComprasClienteVision,
 };

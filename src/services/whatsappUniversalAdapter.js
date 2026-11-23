@@ -101,6 +101,39 @@ async function enviarPresencaUniversal(to, presence = 'composing') {
 }
 
 /**
+ * Envia reação com emoji (ex: 📝, ✅, 👍) para uma mensagem específica.
+ */
+async function enviarReacaoUniversal(telefone, messageId, emoji = '✅') {
+  const destino = formatarDestinoGateway(telefone);
+  if (!destino || !messageId || GATEWAY_TYPE !== 'WAPI' || !WAPI_INSTANCE_ID || !WAPI_TOKEN) return false;
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
+
+  try {
+    const url = `${WAPI_BASE_URL}/message/send-reaction?instanceId=${WAPI_INSTANCE_ID}`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${WAPI_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        phone: destino,
+        messageId: String(messageId),
+        reaction: emoji,
+      }),
+      signal: controller.signal,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/**
  * Marca mensagem recebida como lida (tique azul humanizado).
  */
 async function marcarMensagemComoLida(to, messageId) {
@@ -311,13 +344,83 @@ async function enviarBotoesUniversal(telefone, texto, botoes = [], rodape = 'Coi
     return enviarTextoUniversal(telefone, texto);
   }
 
-  
+  if (GATEWAY_TYPE === 'WAPI' && WAPI_INSTANCE_ID && WAPI_TOKEN) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const url = `${WAPI_BASE_URL}/message/send-button?instanceId=${WAPI_INSTANCE_ID}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${WAPI_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          phone: destino,
+          message: texto,
+          footer: rodape,
+          buttons: botoes.slice(0, 3).map((b, idx) => ({
+            id: b.id || `btn_${idx + 1}`,
+            text: b.label || b.texto || b.text || `Opção ${idx + 1}`,
+          })),
+        }),
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        return await lerRespostaGatewaySegura(res, 'WAPI send-button');
+      }
+    } catch (err) {
+      console.warn('[WAPI Botões] Falha no envio de botões, usando fallback texto:', err.message);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
 
   const opcoesTexto = botoes
     .slice(0, 3)
-    .map((b, idx) => `*${idx + 1}* - ${b.label || b.texto}`)
+    .map((b, idx) => `*${idx + 1}* - ${b.label || b.texto || b.text}`)
     .join('\n');
   return enviarTextoUniversal(telefone, `${texto}\n\n${opcoesTexto}`);
+}
+
+/**
+ * Envia cobrança Pix com chave da loja e suporte nativo W-API PRO.
+ */
+async function enviarPixUniversal(telefone, valor, chavePix = '22998586180', nomeRecebedor = 'Coisas da Roça', textoResumo = '') {
+  const destino = formatarDestinoGateway(telefone);
+  if (!destino) return null;
+
+  if (GATEWAY_TYPE === 'WAPI' && WAPI_INSTANCE_ID && WAPI_TOKEN && valor > 0) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const url = `${WAPI_BASE_URL}/message/send-pix?instanceId=${WAPI_INSTANCE_ID}`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${WAPI_TOKEN}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          phone: destino,
+          key: chavePix,
+          name: nomeRecebedor,
+          amount: Number(valor).toFixed(2),
+        }),
+        signal: controller.signal,
+      });
+      if (res.ok) {
+        return await lerRespostaGatewaySegura(res, 'WAPI send-pix');
+      }
+    } catch (err) {
+      console.warn('[WAPI Pix] Falha no envio nativo de Pix:', err.message);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  const msgPix = `${textoResumo ? textoResumo + '\n\n' : ''}🔑 *Chave Pix (Telefone):* \`${chavePix}\`\n👤 *Favorecido:* ${nomeRecebedor}${valor > 0 ? `\n💰 *Valor:* R$ ${Number(valor).toFixed(2).replace('.', ',')}` : ''}`;
+  return enviarTextoUniversal(telefone, msgPix);
 }
 
 /**
@@ -494,9 +597,9 @@ async function normalizarPayloadWebhook(reqBody) {
     const isImage = Boolean(imageObj || reqBody.isImage || reqBody.type === 'image');
 
     let base64Image = imageObj?.base64 || null;
-    // Baixa imagem se for comando com # ou se for mensagem enviada pelo celular Master da loja (Diogo)
+    // Baixa imagem de cliente para OCR/lista de compras, fotos de comando com # ou fotos da loja
     const isChatPropriaLoja = lojaNum && replyTarget.replace(/\D/g, '') === lojaNum;
-    if (isImage && !base64Image && imageObj && (text.toLowerCase().startsWith('#') || fromMe || isChatPropriaLoja)) {
+    if (isImage && !base64Image && imageObj) {
       base64Image = (await baixarMidiaWAPI(imageObj, 'image')) || imageObj.jpegThumbnail || null;
     }
 
@@ -627,6 +730,7 @@ async function normalizarPayloadWebhook(reqBody) {
 module.exports = {
   normalizarJid,
   enviarPresencaUniversal,
+  enviarReacaoUniversal,
   marcarMensagemComoLida,
   obterDadosContato,
   enviarTextoUniversal,
@@ -634,6 +738,7 @@ module.exports = {
   enviarLocalizacaoUniversal,
   enviarBotoesUniversal,
   enviarListaUniversal,
+  enviarPixUniversal,
   normalizarPayloadWebhook,
   baixarMidiaWAPI,
   formatarDestinoGateway,
