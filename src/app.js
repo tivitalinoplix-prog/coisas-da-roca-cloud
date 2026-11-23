@@ -148,6 +148,52 @@ function isMensagemFornecedorOuRobo(texto = '', pushName = '') {
   return null;
 }
 
+function isContatoEquipeOuBloqueado(chave = '', telefoneReal = '') {
+  const c1 = String(chave || '').replace(/\D/g, '');
+  const c2 = String(telefoneReal || '').replace(/\D/g, '');
+
+  const equipeBloqueada = [
+    '5522998548251', // Rosângela (Irmã Rosilda)
+    '22998548251',
+    '998548251',
+    '5522999959331', // Rosilda
+    '5522999766763', // Diogo Farah
+    '5522999554125', // Mara Rocha
+    '5522999496704', // Mara Marinho
+    '5522997621921', // Balcão Fixo ACR
+    '5522998315708', // Antônio Didi
+    '5522998123102', // Zeca Açougue
+    '5522997477271', // Taiza Franco
+    '5522992762730', // Iasmyn
+    '5522981133427', // Patrick
+    '5522992449963', // Bruno Funcionário
+    '5522988154186', // Jussara Balcão
+    '5522992676855', // Zé Mário
+    '5522997935518', // Entregador 5518
+    '5522998021154', // Gabriel DAM
+    '5522999884222', // Marciano
+  ];
+
+  for (const tel of equipeBloqueada) {
+    if ((c1 && c1.includes(tel)) || (c2 && c2.includes(tel))) return true;
+  }
+
+  try {
+    const p = path.resolve(__dirname, '../../config/contatos_especiais.json');
+    if (fs.existsSync(p)) {
+      const data = JSON.parse(fs.readFileSync(p, 'utf-8'));
+      for (const tel of Object.keys(data)) {
+        if (data[tel].auto_responder === false) {
+          const clean = tel.replace(/\D/g, '');
+          if ((c1 && c1.includes(clean)) || (c2 && c2.includes(clean))) return true;
+        }
+      }
+    }
+  } catch (_) {}
+
+  return false;
+}
+
 async function resolverIdentificadorUnificado(normalizado, body = {}) {
   const sessionKey = normalizado?.sessionKey || '';
   const replyTarget = normalizado?.replyTarget || '';
@@ -580,6 +626,11 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
 
     if (!chaveCanonica) return;
 
+    if (isContatoEquipeOuBloqueado(chaveCanonica, telefoneReal)) {
+      console.log(`[app] 👥 Contato de EQUIPE detectado (${chaveCanonica} / ${telefoneReal}). Automação receptiva desativada.`);
+      return;
+    }
+
     const textoRecebido = String(normalizado.text || '').trim();
 
     if (normalizado.isChatPropriaLoja || textoRecebido.startsWith('#')) {
@@ -625,6 +676,48 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
 
     if (normalizado.fromMe) {
       if (foiEnviadoPeloBot(chaveCanonica, textoRecebido, normalizado.messageId)) {
+        return;
+      }
+
+      if (textoRecebido.toLowerCase().startsWith('#imprimir') || textoRecebido.toLowerCase().startsWith('#comanda')) {
+        const payloadManual = textoRecebido.replace(/^#(imprimir|comanda)\s*/i, '').trim();
+        console.log(`[app] 🖨️ Comando manual de impressão do atendente para ${chaveCanonica}: "${payloadManual}"`);
+        try {
+          if (impressaoTermicaService && typeof impressaoTermicaService.enfileirarImpressaoPedido === 'function') {
+            let desc = payloadManual;
+            if (!desc) {
+              const sessao = await redisService.obterSessao(chaveCanonica);
+              if (sessao && Array.isArray(sessao.historico) && sessao.historico.length > 0) {
+                const msgs = sessao.historico
+                  .filter(h => h.role === 'user')
+                  .map(h => (typeof h.parts === 'string' ? h.parts : (h.parts?.[0]?.text || h.content || '')))
+                  .filter(Boolean);
+                if (msgs.length > 0) desc = msgs.slice(-2).join(' | ');
+              }
+            }
+            const pedidoManual = {
+              pedidoId: `MANUAL-${Math.floor(1000 + Math.random() * 9000)}`,
+              clienteNome: normalizado.pushName || 'Cliente Balcao',
+              clienteTelefone: telefoneReal || chaveCanonica,
+              enderecoEntrega: 'Entrega / Balcao (Verificar conversa)',
+              formaPagamento: 'Confirmado no Balcao',
+              itens: [
+                {
+                  descricao: desc || 'PEDIDO CONFIRMADO NO ATENDIMENTO HUMANO',
+                  quantidade: '1 un',
+                  preparo: 'Separar conforme combinado no WhatsApp'
+                }
+              ]
+            };
+            await impressaoTermicaService.enfileirarImpressaoPedido(pedidoManual);
+            console.log(`[app] ✅ Comanda manual enfileirada para ${chaveCanonica}.`);
+            if (typeof whatsappAdapter.enviarReacaoUniversal === 'function' && normalizado.messageId) {
+              whatsappAdapter.enviarReacaoUniversal(destinoEnvio, normalizado.messageId, '🖨️').catch(() => {});
+            }
+          }
+        } catch (eImp) {
+          console.error('[app] Erro ao enfileirar comanda manual:', eImp.message);
+        }
         return;
       }
 
@@ -680,9 +773,6 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
         setTimeout(() => {
           whatsappAdapter.marcarMensagemComoLida(destinoEnvio, normalizado.messageId).catch(() => {});
         }, 1500).unref();
-      }
-      if (typeof whatsappAdapter.enviarReacaoUniversal === 'function') {
-        whatsappAdapter.enviarReacaoUniversal(destinoEnvio, normalizado.messageId, '📝').catch(() => {});
       }
     }
 
