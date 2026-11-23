@@ -327,21 +327,36 @@ function buscarProdutosRelevantes(mensagemAtual = '', historicoConversa = []) {
   return Array.from(mapa.values());
 }
 
+function isProdutoEmFalta(nome = '') {
+  const emFalta = carregarProdutosEmFalta();
+  const nomeNorm = normalizarTexto(nome);
+  return Array.from(emFalta).some((itemFalta) => nomeNorm.includes(itemFalta));
+}
+
 function formatarCatalogoParaPrompt(produtos = []) {
   if (!produtos || produtos.length === 0) {
     return 'NENHUM PRODUTO DO CATÁLOGO SGM CORRESPONDEU AOS TERMOS DESTA MENSAGEM.';
   }
 
   const emFalta = carregarProdutosEmFalta();
+  const faltasArray = Array.from(emFalta);
 
-  return produtos
+  // Filtra produtos excluindo terminantemente os cortes em falta
+  const disponiveis = produtos.filter((p) => {
+    const nomeNorm = normalizarTexto(p.nome);
+    const emFaltaHoje = faltasArray.some((itemFalta) => nomeNorm.includes(itemFalta));
+    return !emFaltaHoje;
+  });
+
+  if (disponiveis.length === 0) {
+    return 'TODOS OS PRODUTOS CONSULTADOS ESTÃO ESGOTADOS NO BALCÃO HOJE (PROIBIDO VENDER).';
+  }
+
+  return disponiveis
     .map((p) => {
       const precoStr = Number(p.preco).toFixed(2).replace('.', ',');
       const un = p.unidade === 'UN' || p.unidade === 'PCT' || p.unidade === 'CX' ? p.unidade : 'KG';
-      const nomeNorm = normalizarTexto(p.nome);
-      const emFaltaHoje = Array.from(emFalta).some((itemFalta) => nomeNorm.includes(itemFalta));
-      const tagFalta = emFaltaHoje ? ' [AVISO: ITEM EM FALTA NO BALCÃO HOJE]' : '';
-      return `• [Cód ${p.codigo}] ${p.nome} — R$ ${precoStr} / ${un}${tagFalta}`;
+      return `• [Cód ${p.codigo}] ${p.nome} — R$ ${precoStr} / ${un}`;
     })
     .join('\n');
 }
@@ -456,6 +471,7 @@ module.exports = {
   normalizarTexto,
   carregarCatalogo,
   carregarProdutosEmFalta,
+  isProdutoEmFalta,
   buscarProdutosRelevantes,
   formatarCatalogoParaPrompt,
   sincronizarSgmComSupabase,

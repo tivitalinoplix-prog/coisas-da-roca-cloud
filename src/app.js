@@ -128,13 +128,21 @@ function isMensagemFornecedorOuRobo(texto = '', pushName = '') {
     if (txt.includes(t)) return `Chatbot/Sistema (${t})`;
   }
 
+  // Apenas termos empresariais inequívocos no texto. NUNCA colocar nomes próprios como mara, pam, etc.:
   const termosFornecedores = [
     'panko', 'dan solucoes', 'dan soluções', 'dam solucoes', 'dam soluções',
     'arte fruti', 'artefruti', 'menino do polvilho', 'macae med', 'macaé med',
     'andre grafica', 'andré gráfica', 'ticket antecipado de reembolso',
   ];
   for (const t of termosFornecedores) {
-    if (txt.includes(t) || nome.includes(t)) return `Fornecedor (${t})`;
+    if (txt.includes(t)) return `Fornecedor (${t})`;
+  }
+
+  // NUNCA bloquear cliente por primeiro nome no pushName.
+  // Só considera fornecedor no nome se contiver termos corporativos explícitos:
+  const termosCorporativos = ['soluções', 'solucoes', 'distribuidora', 'gráfica', 'grafica', 'ltda', 'eireli'];
+  for (const c of termosCorporativos) {
+    if (nome.includes(c)) return `Fornecedor Corporativo (${c})`;
   }
 
   return null;
@@ -630,6 +638,27 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
 
       await redisService.ativarPausa(chaveCanonica, TEMPO_PAUSA_HUMANA_SEG);
       console.log(`[app] Intervenção humana detectada para ${chaveCanonica}. Bot pausado por 30 min.`);
+      return;
+    }
+
+    // === INTERCEPTADOR DETERMINÍSTICO DE OPT-OUT (CASO BRUNO) ===
+    const isOptOut = /^(sair|parar|cancelar|remover|me tira da lista|não quero receber|nao quero receber|remover da lista|remover meu numero|remover meu número)\b/i.test(textoRecebido.trim());
+    if (isOptOut) {
+      console.log(`[app] 🛑 Solicitação de OPT-OUT detectada para ${chaveCanonica} (${normalizado.pushName}).`);
+      try {
+        const { pool } = require('./database');
+        if (pool) {
+          await pool.query(
+            'UPDATE clientes SET opt_out = true WHERE telefone = $1 OR telefone = $2 OR telefone = $3',
+            [telefoneReal || '', chaveCanonica, chaveCanonica.replace(/\D/g, '')]
+          );
+        }
+      } catch (eOpt) {
+        console.warn('[app] Falha ao gravar opt-out no banco:', eOpt.message);
+      }
+      const msgOptOut = 'Tudo bem! Seu número foi removido da nossa lista de novidades e promoções. Se precisar de carnes frescas ou pedidos no futuro, é só chamar por aqui. Um abraço do Coisas da Roça! 👍';
+      registrarEnvioBot(chaveCanonica, msgOptOut);
+      await enviarMensagemWhatsApp(destinoEnvio, msgOptOut);
       return;
     }
 

@@ -5,9 +5,12 @@ const redisService = require('./redisService');
 const {
   buscarProdutosRelevantes,
   formatarCatalogoParaPrompt,
+  carregarProdutosEmFalta,
+  isProdutoEmFalta,
 } = require('./produtosService');
 
 const NOME_LOJA = process.env.NOME_LOJA || 'Açougue e Mercearia Coisas da Roça';
+const ENDERECO_OFICIAL_LOJA = 'Rua Ferreira Viana, 136 - Centro, Macaé/RJ';
 
 function isConfirmacaoCurtaPedido(texto = '') {
   const t = String(texto || '').trim().toLowerCase();
@@ -124,9 +127,34 @@ function montarMensagemBoasVindas(nomeCliente = '', perfilCliente = null) {
   );
 }
 
-function validarEnderecoEntrega(entregaStr = '') {
-  if (!entregaStr) return { valido: false, motivo: 'VAZIO' };
+function validarEnderecoEntrega(entregaStr = '', isEncomendaFutura = false) {
+  if (!entregaStr) {
+    if (isEncomendaFutura) {
+      return { valido: true, tipo: 'ENCOMENDA_AGENDADA' };
+    }
+    return { valido: false, motivo: 'VAZIO' };
+  }
   const limpo = String(entregaStr).toLowerCase().trim();
+
+  if (
+    isEncomendaFutura ||
+    limpo.includes('encomenda') ||
+    limpo.includes('agendad') ||
+    limpo.includes('agendar') ||
+    limpo.includes('quinta') ||
+    limpo.includes('sexta') ||
+    limpo.includes('sabado') ||
+    limpo.includes('sábado') ||
+    limpo.includes('segunda') ||
+    limpo.includes('terça') ||
+    limpo.includes('terca') ||
+    limpo.includes('quarta') ||
+    limpo.includes('26/11') ||
+    limpo.includes('proxima semana') ||
+    limpo.includes('próxima semana')
+  ) {
+    return { valido: true, tipo: 'ENCOMENDA_AGENDADA' };
+  }
 
   if (limpo.includes('balcao') || limpo.includes('balcão') || limpo.includes('retira')) {
     return { valido: true, tipo: 'RETIRADA_BALCAO' };
@@ -320,18 +348,22 @@ function extrairMetadadosResposta(textoBruto = '', sessaoAtual = {}) {
   let dadosPedido = null;
   let pedidoFechado = false;
 
+  const textoParaAnalise = (bruto + ' ' + (sessaoAtualizada.endereco || '')).toLowerCase();
+  const isEncomenda = /quinta|sexta|sabado|sábado|segunda|terça|terca|quarta|26\/11|encomenda|agendad/i.test(textoParaAnalise);
+
   if (pedidoFechadoTag && sessaoAtualizada.itens.length > 0) {
-    const checkEnd = validarEnderecoEntrega(sessaoAtualizada.endereco);
+    const checkEnd = validarEnderecoEntrega(sessaoAtualizada.endereco, isEncomenda);
     if (checkEnd.valido) {
       pedidoFechado = true;
       dadosPedido = {
         codigo_pedido: String(deltaEstado?.codigo_pedido || Math.floor(100 + Math.random() * 900)).trim(),
         cliente_nome: sessaoAtualizada.clienteNome || 'Cliente WhatsApp',
-        endereco: sessaoAtualizada.endereco,
+        endereco: sessaoAtualizada.endereco || (isEncomenda ? 'Encomenda Agendada (A combinar entrega)' : 'Retirada no Balcão'),
         forma_pagamento: sessaoAtualizada.forma_pagamento || 'A combinar',
         troco_para: sessaoAtualizada.troco_para ?? null,
         total_estimado: Number(somaItens.toFixed(2)),
         itens: sessaoAtualizada.itens,
+        isEncomendaFutura: isEncomenda,
       };
     }
   }
@@ -347,24 +379,52 @@ function extrairMetadadosResposta(textoBruto = '', sessaoAtual = {}) {
   };
 }
 
-function isHorarioComercialAberto() {
+function verificarExpedienteLojaBRT() {
   const agora = new Date();
   const opcoes = { timeZone: 'America/Sao_Paulo', hour12: false };
-  const horaStr = agora.toLocaleTimeString('pt-BR', { ...opcoes, hour: '2-digit' });
-  const minutoStr = agora.toLocaleTimeString('pt-BR', { ...opcoes, minute: '2-digit' });
+  const hora = parseInt(agora.toLocaleTimeString('pt-BR', { ...opcoes, hour: '2-digit' }), 10);
+  const minuto = parseInt(agora.toLocaleTimeString('pt-BR', { ...opcoes, minute: '2-digit' }), 10);
   const diaSemana = agora.toLocaleDateString('en-US', { ...opcoes, weekday: 'short' });
+  const mes = agora.toLocaleDateString('en-US', { ...opcoes, month: 'numeric' });
+  const diaDoMes = parseInt(agora.toLocaleDateString('pt-BR', { ...opcoes, day: 'numeric' }), 10);
+  const minutos = hora * 60 + minuto;
 
-  const hora = parseInt(horaStr, 10);
-  const minuto = parseInt(minutoStr, 10);
-  const minutosDesdeMeiaNoite = hora * 60 + minuto;
+  let aberto = false;
+  let proximaAbertura = 'amanhã às 07h00';
 
-  // Domingo: 07:30 às 13:00 (450 a 780 min)
   if (diaSemana === 'Sun') {
-    return minutosDesdeMeiaNoite >= 450 && minutosDesdeMeiaNoite <= 780;
+    // Domingo FECHADO o ano todo, EXCETO domingos de dezembro (dias 06, 13, 20 e 27 das 09h às 14h)
+    const isDezembro = mes === '12';
+    const domingoDezembroValido = isDezembro && [6, 13, 20, 27].includes(diaDoMes);
+    if (domingoDezembroValido && minutos >= 9 * 60 && minutos <= 14 * 60) {
+      aberto = true;
+    } else {
+      aberto = false;
+      proximaAbertura = 'segunda-feira às 07h00';
+    }
+  } else if (diaSemana === 'Sat') {
+    // Sábado: 08h às 17h (480 a 1020 min)
+    if (minutos >= 8 * 60 && minutos <= 17 * 60) {
+      aberto = true;
+    } else {
+      aberto = false;
+      proximaAbertura = 'segunda-feira às 07h00';
+    }
+  } else {
+    // Segunda a Sexta: 07h às 19h (420 a 1140 min)
+    if (minutos >= 7 * 60 && minutos <= 19 * 60) {
+      aberto = true;
+    } else {
+      aberto = false;
+      proximaAbertura = minutos < 7 * 60 ? 'hoje às 07h00' : 'amanhã às 07h00';
+    }
   }
 
-  // Segunda a Sábado: 07:30 às 19:30 (450 a 1170 min)
-  return minutosDesdeMeiaNoite >= 450 && minutosDesdeMeiaNoite <= 1170;
+  return { aberto, proximaAbertura, hora, minuto, diaSemana };
+}
+
+function isHorarioComercialAberto() {
+  return verificarExpedienteLojaBRT().aberto;
 }
 
 function construirSystemPrompt({ nomeCliente, catalogoFormatado, perfilCliente, sessaoAtiva, faltasBalcao = [], isForaDeExpediente = false }) {
@@ -377,17 +437,21 @@ function construirSystemPrompt({ nomeCliente, catalogoFormatado, perfilCliente, 
     ? 'PROIBIDO repetir "Olá", "Boa noite", "Tudo bem" ou qualquer saudação. Vá 100% direto ao ponto (ex: "Anotado, Txai:").'
     : `Esta é a primeira resposta com itens. Seja breve ("Olá${primeiroNome ? ', ' + primeiroNome : ''}! Já anotei:").`;
 
+  const expediente = verificarExpedienteLojaBRT();
   const blocoNoturno = isForaDeExpediente ? `
 ====================================================================
-MODO FORA DE EXPEDIENTE / ACOLHIMENTO NOTURNO (BALCÃO FECHADO AGORA)
+⚠️ LOJA FECHADA AGORA / ATENDIMENTO FORA DO EXPEDIENTE
 ====================================================================
-ATENÇÃO CRÍTICA: O balcão do açougue e mercearia já encerrou o expediente por hoje.
-Nosso horário de funcionamento é de Segunda a Sábado das 07h30 às 19h30 (Domingo até 13h00).
-DIRETIVAS OBRIGATÓRIAS DESTE MODO:
-1. NUNCA finalize o pedido agora, NUNCA gere a tag [PEDIDO_FECHADO] e NUNCA gere ou prometa envio de chave Pix imediato.
-2. Seja acolhedor e atencioso: explique gentilmente que o balcão já fechou por hoje e que reabriremos amanhã bem cedinho, às 07h30, com carnes frescas selecionadas pelo Diogo.
-3. Diga ao cliente que você já está deixando o pedido dele anotado com prioridade para a equipe separar logo na abertura da manhã.
-4. Mostre o > *Resumo do Pedido* com o aviso: _(Anotado para separação na abertura às 07h30 — valor final confirmado na pesagem de amanhã)_.
+ATENÇÃO CRÍTICA: O balcão do açougue e mercearia está FECHADO neste momento.
+- Horário de Atendimento da Loja Física:
+  • Segunda a Sexta: 07h às 19h
+  • Sábado: 08h às 17h
+  • Domingo: FECHADO (abrindo exclusivamente nos domingos de dezembro: dias 06, 13, 20 e 27 das 09h às 14h)
+DIRETIVAS OBRIGATÓRIAS QUANDO A LOJA ESTÁ FECHADA:
+1. NUNCA finalize o pedido para entrega imediata agora, NUNCA gere a tag [PEDIDO_FECHADO] para envio hoje e NUNCA gere ou prometa envio de chave Pix imediato.
+2. Explique gentilmente ao cliente que o nosso balcão está fechado no momento e que reabriremos ${expediente.proximaAbertura}, com cortes frescos selecionados pelo Diogo.
+3. Diga que você já está deixando o pedido dele pré-anotado para separação logo na abertura (${expediente.proximaAbertura}).
+4. Se o cliente estiver encomendando para uma data futura (ex: quinta-feira, 26/11, sábado), confirme com naturalidade e emita [ENCOMENDA AGENDADA].
 ` : '';
 
   const estadoCarrinhoJson = JSON.stringify({
@@ -398,14 +462,16 @@ DIRETIVAS OBRIGATÓRIAS DESTE MODO:
   }, null, 2);
 
   const blocoFaltas = faltasBalcao.length > 0
-    ? `\nITENS ESGOTADOS HOJE NO BALCÃO (PROIBIDO VENDER):\n${faltasBalcao.map((f) => `• ${f}`).join('\n')}\n`
+    ? `\n====================================================================\n🚫 CORTES ESGOTADOS HOJE — PROIBIDO VENDER:\n====================================================================\n${faltasBalcao.map((f) => `• ${f} (TOTALMENTE ESGOTADO HOJE NO BALCÃO! NUNCA AFIRME QUE TEMOS E NUNCA INCLUA NO PEDIDO)`).join('\n')}\nSe o cliente pedir um desses cortes esgotados, explique com simpatia que já acabou tudo hoje e sugira um corte alternativo de primeira linha ou anote para o dia seguinte!\n`
     : '';
 
   return `Você é o atendente de balcão do *${NOME_LOJA}* (Macaé/RJ).
+📍 ENDEREÇO OFICIAL DA LOJA: ${ENDERECO_OFICIAL_LOJA}
 Fale como um balconista de confiança: direto, simpático e enxuto (15 a 35 palavras fora da lista). Sem formalismo robótico, sem adjetivos melosos ("vai ficar uma delícia", "com todo carinho"), sem "meu querido(a)" e NUNCA use emoji de trigo. Use apenas 🥩, 👍, 📍, 🛵.
 
 ${regraSaudacao}
 ${blocoNoturno}
+${blocoFaltas}
 
 ====================================================================
 TIPOGRAFIA NATIVA DO WHATSAPP (OBRIGATÓRIA PARA LIMPEZA VISUAL)
@@ -432,7 +498,10 @@ REGRAS DO CARRINHO MULTI-TURN (TOLERÂNCIA ZERO À AMNÉSIA):
    _Valores das carnes são estimados; o valor exato sai na balança com o cupom._
 4. ANCORAGEM NO SGM: Use EXCLUSIVAMENTE produtos e preços do CATÁLOGO SGM abaixo. Nunca invente marcas ou valores.
 5. ÁGUA MINERAL 20L: Sempre priorize e informe primeiro o preço do *Refil/Reposição* (troca do galão vazio) antes do galão completo, e pergunte se o cliente já possui o vasilhame vazio para troca.
-6. ENDEREÇO COMPLETO E LOCALIZAÇÃO: Para entrega em Macaé, exija *Rua, Número e Bairro* (nunca aceite só "Macaé"). Se o cliente pedir o endereço ou localização da loja para retirada, informe e adicione [ENVIAR_LOCALIZACAO].
+6. ENDEREÇO OFICIAL DA LOJA E LOCALIZAÇÃO:
+   - Nosso endereço oficial é SEMPRE "${ENDERECO_OFICIAL_LOJA}". Se o cliente pedir o endereço ou localização da loja para retirada, informe exatamente "${ENDERECO_OFICIAL_LOJA}" e adicione [ENVIAR_LOCALIZACAO]. NUNCA invente outro endereço ou bairro diferente.
+   - Para entrega em domicílio em Macaé, exija *Rua, Número e Bairro* (nunca aceite só "Macaé").
+   - Se for encomenda agendada para data futura (ex: quinta-feira, 26/11, sábado), aceite o agendamento mesmo sem endereço imediato, emitindo [ENCOMENDA AGENDADA].
 7. BOTÕES INTERATIVOS:
    - Se já tem os itens e o endereço, mas falta apenas a forma de pagamento, pergunte a forma de pagamento e adicione [BOTOES_PAGAMENTO] ao final.
    - Se já tem itens, endereço completo e forma de pagamento, mostre o > *Resumo do Pedido* limpo e peça confirmação para enviar ao balcão, adicionando [BOTOES_CONFIRMACAO] ao final.
@@ -691,12 +760,15 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
     : false;
   const isForaDeExpediente = !aberto && !testador;
 
+  const emFaltaSet = typeof carregarProdutosEmFalta === 'function' ? carregarProdutosEmFalta() : new Set();
+  const faltasEfetivas = Array.from(new Set([...(faltasBalcao || []), ...Array.from(emFaltaSet)]));
+
   const systemInstruction = construirSystemPrompt({
     nomeCliente,
     catalogoFormatado,
     perfilCliente,
     sessaoAtiva,
-    faltasBalcao,
+    faltasBalcao: faltasEfetivas,
     isForaDeExpediente,
   });
 
@@ -772,6 +844,8 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
 }
 
 module.exports = {
+  ENDERECO_OFICIAL_LOJA,
+  verificarExpedienteLojaBRT,
   isHorarioComercialAberto,
   isSaudacaoPura,
   montarMensagemBoasVindas,
