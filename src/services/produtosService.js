@@ -279,9 +279,9 @@ function buscarProdutosRelevantes(mensagemAtual = '', historicoConversa = []) {
     const tokens = lNorm.split(' ').map((t) => singularizarToken(t)).filter((t) => t.length >= 3 && !STOPWORDS.has(t));
     if (!tokens.length) continue;
 
-    const termosDaLinha = [tokens.join(' ')];
+    const termosDaLinha = extrairTermosBuscaOtimizado(linha);
     for (const t of tokens) {
-      termosDaLinha.push(t);
+      if (!termosDaLinha.includes(t)) termosDaLinha.push(t);
       if (SINONIMOS_ACOUGUE[t]) termosDaLinha.push(...SINONIMOS_ACOUGUE[t]);
     }
 
@@ -468,6 +468,7 @@ if (dbPool) {
 }
 
 module.exports = {
+  extrairTermosBuscaOtimizado,
   normalizarTexto,
   carregarCatalogo,
   carregarProdutosEmFalta,
@@ -477,3 +478,71 @@ module.exports = {
   sincronizarSgmComSupabase,
   atualizarCatalogoSgm,
 };
+
+function extrairTermosBuscaOtimizado(texto = '') {
+  const stopwords = new Set([
+    'oi', 'ola', 'opa', 'bom', 'dia', 'boa', 'tarde', 'noite', 'tudo', 'bem',
+    'quero', 'queria', 'gostaria', 'preciso', 'manda', 'mandar', 'pode', 'ver', 've',
+    'tem', 'voces', 'ai', 'por', 'favor', 'pfv', 'me', 'uma', 'um', 'uns', 'umas',
+    'de', 'da', 'do', 'das', 'dos', 'para', 'pra', 'pro', 'com', 'sem', 'mais', 'menos',
+    'outro', 'outra', 'tambem', 'ja', 'agora', 'hoje', 'amanha', 'quanto', 'custa', 'valor',
+    'preco', 'kg', 'kilo', 'kilos', 'quilo', 'quilos', 'grama', 'gramas', 'gr', 'g',
+    'unidade', 'unidades', 'un', 'pct', 'pacote', 'pacotes', 'bandeja', 'caixa', 'litro', 'litros',
+    'corta', 'cortado', 'cortada', 'inteiro', 'inteira', 'limpo', 'limpa',
+    'bife', 'bifes', 'cubos', 'pedacos', 'churrasco', 'panela', 'picado', 'picada',
+    'rua', 'avenida', 'av', 'numero', 'casa', 'apto', 'apartamento', 'bloco', 'bairro',
+    'pix', 'cartao', 'dinheiro', 'credito', 'debito', 'troco', 'entrega', 'retirar',
+    'ok', 'certo', 'fechado', 'isso', 'mesmo', 'fechar', 'confirmado', 'obrigado', 'obrigada',
+    'valeu', 'show', 'beleza', 'perfeito', 'sim', 'nao', 'tira', 'tirar', 'coloca', 'colocar'
+  ]);
+
+  const preposicoesLigacao = new Set(['de', 'da', 'do', 'das', 'dos']);
+  const limpo = normalizarTexto(texto);
+  const tokensBrutos = limpo
+    .split(' ')
+    .filter((t) => t.length >= 2 && !/^\d+([.,]\d+)?(kg|g|gr|ml|l|un|pct|k)?$/i.test(t));
+
+  const compostos = [];
+  const simples = [];
+
+  for (let i = 0; i < tokensBrutos.length - 2; i++) {
+    const a = tokensBrutos[i];
+    const prep = tokensBrutos[i + 1];
+    const b = tokensBrutos[i + 2];
+    if (!stopwords.has(a) && preposicoesLigacao.has(prep) && !stopwords.has(b)) {
+      compostos.push(`${a} ${prep} ${b}`);
+      compostos.push(`${a} ${b}`);
+    }
+  }
+
+  const substantivos = tokensBrutos.filter((t) => t.length >= 3 && !stopwords.has(t));
+
+  for (let i = 0; i < substantivos.length - 1; i++) {
+    const bg = `${substantivos[i]} ${substantivos[i + 1]}`;
+    if (bg.length >= 6) compostos.push(bg);
+  }
+
+  const mapaSinonimos = {
+    rosca: ['farinha de rosca', 'farinha rosca'],
+    cha: ['cha de dentro', 'coxao mole'],
+    coxao: ['coxao mole', 'coxao duro', 'cha de dentro'],
+    contra: ['contra file', 'contrafile'],
+    meio: ['meio da asa', 'tulipa'],
+    tulipa: ['meio da asa', 'tulipa'],
+    drumet: ['coxinha da asa', 'drumet'],
+    moida: ['patinho', 'acem', 'musculo'],
+    macarrao: ['macarrao', 'espaguete', 'parafuso', 'penne'],
+  };
+
+  for (const s of substantivos) {
+    if (mapaSinonimos[s]) {
+      for (const sin of mapaSinonimos[s]) {
+        if (sin.includes(' ')) compostos.push(normalizarTexto(sin));
+        else simples.push(normalizarTexto(sin));
+      }
+    }
+    simples.push(s);
+  }
+
+  return Array.from(new Set([...compostos, ...simples]));
+}

@@ -727,7 +727,47 @@ async function normalizarPayloadWebhook(reqBody) {
   return null;
 }
 
+
+/**
+ * 12. [FASE 2 DIOGO] Publica Imagem ou Texto no Status do WhatsApp (Stories 24h)
+ */
+async function publicarStatusWhatsApp({ texto = '', base64OuUrlImagem = null } = {}) {
+  if (GATEWAY_TYPE !== 'WAPI') return { ok: false, motivo: 'GATEWAY_NAO_WAPI' };
+
+  // Tentativa 1: Rota dedicada de Status da W-API (imagem ou texto)
+  if (base64OuUrlImagem) {
+    const r1 = await wapiPost('/status/send-image', {
+      image: base64OuUrlImagem,
+      caption: texto || '',
+    }, 10000);
+    if (r1.ok && r1.data && !r1.data.error) return { ok: true, rota: '/status/send-image', data: r1.data };
+
+    const r2 = await wapiPost('/message/send-image', {
+      phone: 'status@broadcast',
+      image: base64OuUrlImagem,
+      caption: texto || '',
+    }, 10000);
+    if (r2.ok && r2.data && !r2.data.error) return { ok: true, rota: 'status@broadcast (image)', data: r2.data };
+  } else if (texto) {
+    const r1 = await wapiPost('/status/send-text', {
+      message: texto,
+      backgroundColor: '#7A1C1C',
+      font: 1,
+    }, 8000);
+    if (r1.ok && r1.data && !r1.data.error) return { ok: true, rota: '/status/send-text', data: r1.data };
+
+    const r2 = await wapiPost('/message/send-text', {
+      phone: 'status@broadcast',
+      message: texto,
+    }, 8000);
+    if (r2.ok && r2.data && !r2.data.error) return { ok: true, rota: 'status@broadcast (text)', data: r2.data };
+  }
+
+  return { ok: false, motivo: 'ROTA_STATUS_NAO_SUPORTADA_NA_INSTANCIA' };
+}
+
 module.exports = {
+  publicarStatusWhatsApp,
   normalizarJid,
   enviarPresencaUniversal,
   enviarReacaoUniversal,

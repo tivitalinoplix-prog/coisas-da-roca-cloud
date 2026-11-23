@@ -15,7 +15,7 @@
 const fs = require('fs');
 const path = require('path');
 const { pool } = require('../database');
-const { enviarTextoUniversal } = require('./whatsappUniversalAdapter');
+const { enviarTextoUniversal, enviarImagemUniversal } = require('./whatsappUniversalAdapter');
 
 // Carregar contatos especiais bloqueados para campanhas (raiz do projeto)
 function carregarContatosBloqueados() {
@@ -136,7 +136,7 @@ function formatarMensagemParaCliente(templateSpintax, nomeCliente) {
 /**
  * Envia uma mensagem individual respeitando todas as regras de proteção
  */
-async function enviarMensagemIndividualHumanizada({ telefone, nome, templateSpintax, origemCampanha = 'GERAL' }) {
+async function enviarMensagemIndividualHumanizada({ telefone, nome, templateSpintax, imagemBase64OuUrl = null, origemCampanha = 'GERAL' }) {
   const cleanPhone = String(telefone).replace(/[^0-9]/g, '');
   if (!cleanPhone || cleanPhone.length < 10) {
     return { sucesso: false, motivo: 'TELEFONE_INVALIDO' };
@@ -165,7 +165,9 @@ async function enviarMensagemIndividualHumanizada({ telefone, nome, templateSpin
 
   try {
     console.log(`📤 [Disparo Humanizado] Enviando para ${nome || 'Cliente'} (${cleanPhone})...`);
-    const retorno = await enviarTextoUniversal(cleanPhone, textoFinal);
+    const retorno = (imagemBase64OuUrl && typeof enviarImagemUniversal === 'function')
+      ? await enviarImagemUniversal(cleanPhone, imagemBase64OuUrl, textoFinal)
+      : await enviarTextoUniversal(cleanPhone, textoFinal);
 
     incrementarContadorDiario();
 
