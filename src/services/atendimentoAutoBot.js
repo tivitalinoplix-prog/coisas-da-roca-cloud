@@ -17,7 +17,7 @@ const path = require('path');
 // CONFIGURAÇÃO
 // ============================================================
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY || '';
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.5-flash';
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';

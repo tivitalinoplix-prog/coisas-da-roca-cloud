@@ -17,7 +17,7 @@ async function processarAudioComGemini(base64Audio, clienteTelefone, apiKey) {
     process.env.GEMINI_MODEL_EXECUTOR || 'gemini-3.5-flash-lite',
     'gemini-3-flash-preview',
     'gemini-3.8-flash',
-    'gemini-4-hydrogen'
+    'gemini-3.5-flash'
   ];
 
   const promptSystem = `Você é o Principal Especialista de Balcão e Ingestão Multimodal do Açougue e Mercearia Coisas da Roça (Macaé/RJ).
@@ -112,7 +112,7 @@ async function lerListaComprasImagem(imageUrl) {
 
     if (!base64Img) return '';
 
-    for (const mod of ['gemini-4-hydrogen', 'gemini-3.5-flash-lite', 'gemini-3-flash-preview', 'gemini-3.8-flash']) {
+    for (const mod of ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3-flash-preview', 'gemini-3.8-flash']) {
       try {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${mod}:generateContent?key=${apiKey}`;
         const r = await fetch(url, {

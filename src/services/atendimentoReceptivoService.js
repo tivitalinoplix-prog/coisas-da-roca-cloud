@@ -47,31 +47,38 @@ function obterResumoFreteMacaeZesto() {
   return 'FRETE GRÁTIS acima de R$ 200,00. Taxas Macaé: Centro R$ 5,00 | Imbetiba R$ 8,00 | Cavaleiros/Miramar/Glória/Aroeira R$ 13,00 | Aeroporto/Granja R$ 15,00 | Ajuda/Imboassica R$ 25,00 | Vale das Palmeiras R$ 30,00.';
 }
 
-function selecionarModelosSwarm(textoMensagem = '', contexto = []) {
+function selecionarModelosSwarm(textoMensagem = '', historico = []) {
   const txt = String(textoMensagem || '').toLowerCase();
-  const matchesPesos = txt.match(/\b(\d+([.,]\d+)?\s*(kg|kilo|quilo|g|gr|gramas|un|pct|pacote|bandeja|galao))\b/gi) || [];
-  const temMultiplosPesos = matchesPesos.length >= 3;
-  const temTrocaOuRevisao = /\b(tira|tirar|troca|trocar|muda|mudar|substitui|cancela|menos|sem o|sem a|releia|faltou|faltam|esqueceu|errado|repetir|ultimo pedido|último pedido)\b/i.test(txt);
-  const isFotoListaOuAudioLongo = txt.includes('[foto de lista') || txt.length >= 150 || (txt.includes('[áudio') && txt.length >= 100);
-  const tamanhoContexto = Array.isArray(contexto) ? contexto.length : (Array.isArray(contexto?.itens) ? contexto.itens.length : 0);
+  const qtdTurnos = Array.isArray(historico) ? historico.length : 0;
 
-  if (temMultiplosPesos || temTrocaOuRevisao || isFotoListaOuAudioLongo || tamanhoContexto >= 4) {
-    console.log('[Swarm Router] Turno COMPLEXO -> Maestro (gemini-4-hydrogen / gemini-3.5-flash-lite)');
+  const matchesPesos =
+    txt.match(/\b(\d+([.,]\d+)?\s*(kg|kilo|quilo|g|gr|gramas|un|pct|pacote|bandeja|saquinho|galao|garrafao))\b/gi) || [];
+  const temMultiplosPesos = matchesPesos.length >= 3;
+
+  const temTrocaOuRemocao =
+    /\b(tira|tirar|troca|trocar|muda|mudar|substitui|cancela|menos|sem o|sem a|no lugar|em vez de|repetir|ultimo pedido|último pedido|releia|faltou|faltam)\b/i.test(txt);
+
+  const isFotoListaOuAudioLongo =
+    txt.includes('[foto de lista') ||
+    txt.length >= 160 ||
+    (txt.includes('[áudio') && txt.length >= 110);
+
+  if (temMultiplosPesos || temTrocaOuRemocao || isFotoListaOuAudioLongo || qtdTurnos >= 6) {
+    console.log('[Swarm Router] Turno COMPLEXO -> Maestro (gemini-3.5-flash)');
     return [
-      process.env.GEMINI_MODEL_MAESTRO || 'gemini-4-hydrogen',
+      process.env.GEMINI_MODEL_MAESTRO || 'gemini-3.5-flash',
       'gemini-3.5-flash-lite',
+      'gemini-flash-lite-latest',
       'gemini-3-flash-preview',
-      'gemini-3.8-flash',
-      'gemini-1.5-flash',
     ];
   }
-  console.log('[Swarm Router] Turno PADRÃO -> Executor Rápido (gemini-3.5-flash-lite / gemini-3-flash-preview)');
+
+  console.log('[Swarm Router] Turno PADRÃO -> Executor Rápido (gemini-3.5-flash-lite)');
   return [
     process.env.GEMINI_MODEL_EXECUTOR || 'gemini-3.5-flash-lite',
+    'gemini-3.5-flash',
+    'gemini-flash-lite-latest',
     'gemini-3-flash-preview',
-    'gemini-3.8-flash',
-    'gemini-4-hydrogen',
-    'gemini-1.5-flash',
   ];
 }
 
@@ -565,7 +572,7 @@ async function chamarGeminiComResiliencia(systemInstruction, contents, modelosPr
 
   const modelos = Array.isArray(modelosPrioritarios) && modelosPrioritarios.length
     ? Array.from(new Set(modelosPrioritarios.filter(Boolean)))
-    : ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-4-hydrogen', 'gemini-2.5-flash', 'gemini-2.0-flash'];
+    : ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-2.0-flash'];
 
   let ultimoErro = null;
 
@@ -850,7 +857,7 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
  */
 async function extrairListaComprasClienteVision(base64Image, apiKey = null) {
   if (!base64Image) return null;
-  const modelosVision = ['gemini-4-hydrogen', 'gemini-3.5-flash-lite', 'gemini-3-flash-preview', 'gemini-3.8-flash'];
+  const modelosVision = ['gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-3-flash-preview', 'gemini-3.8-flash'];
   const cleanBase64 = base64Image.replace(/^data:image\/[a-z0-9]+;base64,/i, '');
   const keyToUse = apiKey || process.env.GEMINI_API_KEY || '';
 
