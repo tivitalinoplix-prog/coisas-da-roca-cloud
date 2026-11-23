@@ -207,10 +207,11 @@ async function confirmarImpressaoJob(id) {
   const res = await pool.query(
     `UPDATE fila_impressao
      SET status = 'IMPRESSO', impresso_em = NOW(), atualizado_em = NOW()
-     WHERE id = $1;`,
+     WHERE id = $1
+     RETURNING id, pedido_id, cliente_nome, cliente_telefone, status;`,
     [id]
   );
-  return res.rowCount > 0;
+  return res.rows[0] || null;
 }
 
 module.exports = {

@@ -1,4 +1,6 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const fs = require('fs');
+const path = require('path');
 const redisService = require('./redisService');
 const {
   buscarProdutosRelevantes,
@@ -6,6 +8,69 @@ const {
 } = require('./produtosService');
 
 const NOME_LOJA = process.env.NOME_LOJA || 'Açougue e Mercearia Coisas da Roça';
+
+function isConfirmacaoCurtaPedido(texto = '') {
+  const t = String(texto || '').trim().toLowerCase();
+  if (!t || t.length > 28) return false;
+  return /^(1|sim|s|ok|okay|confirmar|confirmo|confirmado|pode fechar|fechar|fechado|pode mandar|manda|mandar|isso|isso mesmo|ta otimo|tá ótimo|certo|certinho|✅|👍|👌|☑️|✔️)+$/i.test(t);
+}
+
+function normalizarMensagemConfirmacao(texto = '', temHistorico = false) {
+  if (temHistorico && isConfirmacaoCurtaPedido(texto)) {
+    return '[CONFIRMAÇÃO DO CLIENTE]: O cliente enviou "' + String(texto).trim() + '" (Opção 1 - Confirmar Pedido). NÃO busque novos itens no catálogo e NÃO diga que o item não foi encontrado! Feche imediatamente o pedido com os itens, endereço e pagamento do Resumo do Pedido anterior, emitindo a tag [PEDIDO_FECHADO] e o bloco <COMANDA_JSON>.';
+  }
+  return texto;
+}
+
+function obterResumoFreteMacaeZesto() {
+  const caminhos = [
+    path.resolve(__dirname, '../../config/bairros_macae_frete.json'),
+    path.resolve(__dirname, '../../../config/bairros_macae_frete.json'),
+    path.resolve(process.cwd(), 'config/bairros_macae_frete.json'),
+    path.resolve(process.cwd(), 'app/config/bairros_macae_frete.json'),
+  ];
+  for (const p of caminhos) {
+    if (fs.existsSync(p)) {
+      try {
+        const cfg = JSON.parse(fs.readFileSync(p, 'utf-8'));
+        const min = Number(cfg?.regras_especiais?.frete_gratis_valor_minimo || 200).toFixed(2).replace('.', ',');
+        const lista = Object.entries(cfg.bairros || {})
+          .map(([b, v]) => b + ': R$ ' + Number(v).toFixed(2).replace('.', ','))
+          .join(' | ');
+        return 'FRETE GRÁTIS em compras acima de R$ ' + min + '. Taxas por bairro em Macaé: ' + lista;
+      } catch (_) {}
+    }
+  }
+  return 'FRETE GRÁTIS acima de R$ 200,00. Taxas Macaé: Centro R$ 5,00 | Imbetiba R$ 8,00 | Cavaleiros/Miramar/Glória/Aroeira R$ 13,00 | Aeroporto/Granja R$ 15,00 | Ajuda/Imboassica R$ 25,00 | Vale das Palmeiras R$ 30,00.';
+}
+
+function selecionarModelosSwarm(textoMensagem = '', contexto = []) {
+  const txt = String(textoMensagem || '').toLowerCase();
+  const matchesPesos = txt.match(/\b(\d+([.,]\d+)?\s*(kg|kilo|quilo|g|gr|gramas|un|pct|pacote|bandeja|galao))\b/gi) || [];
+  const temMultiplosPesos = matchesPesos.length >= 3;
+  const temTrocaOuRevisao = /\b(tira|tirar|troca|trocar|muda|mudar|substitui|cancela|menos|sem o|sem a|releia|faltou|faltam|esqueceu|errado|repetir|ultimo pedido|último pedido)\b/i.test(txt);
+  const isFotoListaOuAudioLongo = txt.includes('[foto de lista') || txt.length >= 150 || (txt.includes('[áudio') && txt.length >= 100);
+  const tamanhoContexto = Array.isArray(contexto) ? contexto.length : (Array.isArray(contexto?.itens) ? contexto.itens.length : 0);
+
+  if (temMultiplosPesos || temTrocaOuRevisao || isFotoListaOuAudioLongo || tamanhoContexto >= 4) {
+    console.log('[Swarm Router] Turno COMPLEXO -> Maestro (gemini-4-hydrogen / gemini-2.5-flash)');
+    return [
+      process.env.GEMINI_MODEL_MAESTRO || 'gemini-4-hydrogen',
+      'gemini-3.8-flash',
+      'gemini-3.5-flash-lite',
+      'gemini-2.5-flash',
+      'gemini-2.0-flash',
+    ];
+  }
+  console.log('[Swarm Router] Turno PADRÃO -> Executor Rápido (gemini-3.8-flash / gemini-2.0-flash)');
+  return [
+    process.env.GEMINI_MODEL_EXECUTOR || 'gemini-3.8-flash',
+    'gemini-3.5-flash-lite',
+    'gemini-4-hydrogen',
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+  ];
+}
 
 function obterChavesGemini() {
   return [
@@ -385,6 +450,11 @@ REGRAS DO CARRINHO MULTI-TURN (TOLERÂNCIA ZERO À AMNÉSIA):
       LEIA CADA LINHA DA LISTA COM RIGOR TOTAL.
       É PROIBIDO dizer que "adicionou com o gerente" sem de fato acrescentar os itens faltantes no resumo e no JSON!
       Adicione TODOS os itens solicitados pelo cliente que faltavam, preservando rigorosamente as quantidades exatas de cada linha (ex: 8kg para o que foi pedido 8kg, 3kg para o que foi pedido 3kg).
+11. FRETE MACAÉ, FRETE GRÁTIS R$ 200 E CONFIRMAÇÃO 1/✅:
+    - Tabela de Frete Macaé: ${obterResumoFreteMacaeZesto()}
+    - Se o total estimado dos produtos atingir ou passar de *R$ 200,00* (como no exemplo de R$ 294,92), destaque no resumo: *🚚 Frete: GRÁTIS (pedido acima de R$ 200,00)*! Se ficar entre R$ 145,00 e R$ 199,99, mostre quanto falta para ganhar *Frete Grátis*. Caso contrário, exiba a taxa do bairro do cliente.
+    - Quando o cliente responder "1", "✅", "sim", "ok" ou "[CONFIRMAÇÃO DO CLIENTE]" após você ter exibido o Resumo do Pedido com opções "1 - Confirmar Pedido / 2 - Ajustar Itens", JAMAIS diga que não encontrou o item no catálogo! Feche o pedido imediatamente com [PEDIDO_FECHADO] e gere o código de 3 dígitos em crase (ex: \`Pedido #314\`).
+    - Se a mensagem vier com "[Foto de lista de compras enviada pelo cliente]:", anote todos os itens extraídos da foto no carrinho.
 
 ====================================================================
 SAÍDA ESTRUTURADA OBRIGATÓRIA EM TODO TURNO (INVISÍVEL AO CLIENTE)
@@ -418,19 +488,15 @@ CATÁLOGO SGM DISPONÍVEL:
 ${catalogoFormatado}`;
 }
 
-async function chamarGeminiComResiliencia(systemInstruction, contents) {
+async function chamarGeminiComResiliencia(systemInstruction, contents, modelosPrioritarios = null) {
   const chaves = obterChavesGemini();
   if (!chaves.length) {
     throw new Error('Nenhuma GEMINI_API_KEY configurada no ambiente.');
   }
 
-  const modelos = Array.from(
-    new Set([
-      process.env.GEMINI_MODEL || 'gemini-2.5-flash',
-      'gemini-2.5-flash',
-      'gemini-3.5-flash-lite',
-    ].filter(Boolean))
-  );
+  const modelos = Array.isArray(modelosPrioritarios) && modelosPrioritarios.length
+    ? Array.from(new Set(modelosPrioritarios.filter(Boolean)))
+    : ['gemini-3.8-flash', 'gemini-3.5-flash-lite', 'gemini-4-hydrogen', 'gemini-2.5-flash', 'gemini-2.0-flash'];
 
   let ultimoErro = null;
 
@@ -488,7 +554,9 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
     : (sessaoOuHistorico || {});
 
   let historicoMensagens = Array.isArray(sessaoAtiva.historico) ? [...sessaoAtiva.historico] : [];
-  const textoAtual = String(mensagemCliente || '').trim();
+  const textoBruto = String(mensagemCliente || '').trim();
+  const temHistoricoPre = Array.isArray(historicoMensagens) && historicoMensagens.length > 0;
+  const textoAtual = normalizarMensagemConfirmacao(textoBruto, temHistoricoPre);
 
   // Reset de sessão por inatividade (> 45 minutos) ou pedido anterior já fechado
   const QUARENTA_E_CINCO_MIN_MS = 45 * 60 * 1000;
@@ -660,7 +728,11 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
   }
 
   try {
-    const respostaBruta = await chamarGeminiComResiliencia(systemInstruction, contents);
+    const respostaBruta = await chamarGeminiComResiliencia(
+      systemInstruction,
+      contents,
+      selecionarModelosSwarm(textoAtual, historicoMensagens)
+    );
     const metadados = extrairMetadadosResposta(respostaBruta, {
       ...sessaoAtiva,
       boasVindasEnviada: true,

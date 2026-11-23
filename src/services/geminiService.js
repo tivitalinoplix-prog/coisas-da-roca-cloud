@@ -77,4 +77,55 @@ Responda APENAS com um objeto JSON válido (sem markdown, sem backticks):
   return JSON.parse(rawText);
 }
 
-module.exports = { processarAudioComGemini, dicionario };
+async function lerListaComprasImagem(imageUrl) {
+  if (!imageUrl) return '';
+  const apiKey = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
+  if (!apiKey) return '';
+  try {
+    let base64Img = '';
+    let contentType = 'image/jpeg';
+    if (imageUrl.startsWith('data:')) {
+      const match = imageUrl.match(/^data:([^;]+);base64,(.+)$/);
+      if (match) {
+        contentType = match[1];
+        base64Img = match[2];
+      }
+    } else {
+      const respImg = await fetch(imageUrl);
+      if (!respImg.ok) return '';
+      contentType = respImg.headers.get('content-type') || 'image/jpeg';
+      base64Img = Buffer.from(await respImg.arrayBuffer()).toString('base64');
+    }
+
+    if (!base64Img) return '';
+
+    for (const mod of ['gemini-2.5-flash', 'gemini-2.0-flash', 'gemini-1.5-flash']) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${mod}:generateContent?key=${apiKey}`;
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: 'Transcreva fielmente os itens e quantidades desta lista de compras de açougue/mercearia escrita pelo cliente. Retorne apenas os itens em linha simples.' },
+                { inlineData: { mimeType: contentType, data: base64Img } }
+              ]
+            }]
+          })
+        });
+        if (!r.ok) continue;
+        const data = await r.json();
+        const txt = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+        if (txt.trim()) return txt.trim();
+      } catch (_) {}
+    }
+  } catch (_) {}
+  return '';
+}
+
+module.exports = {
+  processarAudioComGemini,
+  lerListaComprasImagem,
+  dicionario,
+};

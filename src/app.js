@@ -9,7 +9,6 @@ const redisService = require('./services/redisService');
 const visaoComandosService = require('./services/visaoComandosService');
 const pesagemPixService = require('./services/pesagemPixService');
 const { executarFechamentoExpediente } = require('./services/fechamentoExpedienteService');
-const produtosService = require('./services/produtosService');
 
 let db = null;
 try {
@@ -44,6 +43,13 @@ try {
   impressaoTermicaService = require('./services/impressaoTermicaService');
 } catch (e) {
   console.warn('[app] impressaoTermicaService.js indisponível:', e.message);
+}
+
+let produtosService = null;
+try {
+  produtosService = require('./services/produtosService');
+} catch (e) {
+  console.warn('[app] produtosService.js indisponível:', e.message);
 }
 
 let cronService = null;
@@ -652,6 +658,21 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
       textoFinal = textoFinal ? `${textoFinal}\n${transcricao}` : transcricao;
     }
 
+    if (normalizado.isImage && geminiService && typeof geminiService.lerListaComprasImagem === 'function') {
+      try {
+        const urlImg = normalizado.imageUrl || (normalizado.base64Image ? `data:image/jpeg;base64,${normalizado.base64Image}` : null);
+        if (urlImg) {
+          const listaOcr = await geminiService.lerListaComprasImagem(urlImg);
+          if (listaOcr) {
+            const prefixo = `[Foto de lista de compras enviada pelo cliente]:\n${listaOcr}`;
+            textoFinal = textoFinal ? `${textoFinal}\n${prefixo}` : prefixo;
+          }
+        }
+      } catch (errOcr) {
+        console.warn('[app] Falha ao processar OCR de lista de compras:', errOcr.message);
+      }
+    }
+
     if (!textoFinal) return;
 
     await redisService.adicionarBufferMensagem(chaveCanonica, {
@@ -694,7 +715,18 @@ app.post('/api/impressao/status', autenticarWorkerInterno, async (req, res) => {
   try {
     if (impressaoTermicaService) {
       if (status === 'IMPRESSO' && typeof impressaoTermicaService.confirmarImpressaoJob === 'function') {
-        await impressaoTermicaService.confirmarImpressaoJob(id);
+        const jobConfirmado = await impressaoTermicaService.confirmarImpressaoJob(id);
+        try {
+          const telCliente = jobConfirmado?.cliente_telefone || jobConfirmado?.contato || req.body?.cliente_telefone || req.body?.contato;
+          if (telCliente && typeof enviarMensagemWhatsApp === 'function') {
+            await enviarMensagemWhatsApp(
+              telCliente,
+              '> 🥩 *Status do Pedido:* Sua comanda acabou de sair na impressora do nosso balcão e o açougueiro já começou a separar seus cortes! Assim que passar na balança, te enviamos o cupom por aqui.'
+            );
+          }
+        } catch (eNotif) {
+          console.warn('[app] Aviso de impressão não enviado no WhatsApp:', eNotif.message);
+        }
       } else if (status === 'PENDENTE' && db && db.pool) {
         if (adiadoPorPdv || (erro && String(erro).startsWith('BUSY:'))) {
           await db.pool.query(
@@ -759,6 +791,38 @@ app.get('/worker-caixa1.ps1', autenticarWorkerInterno, (req, res) => {
   return res.status(404).send('# Arquivo worker_impressao_caixa1.ps1 não encontrado no servidor');
 });
 
+app.post('/api/produtos/sync', autenticarWorkerInterno, async (req, res) => {
+  try {
+    const { produtos } = req.body || {};
+    if (!produtos || !Array.isArray(produtos)) {
+      return res.status(400).json({ error: 'Array "produtos" é obrigatório no corpo da requisição.' });
+    }
+    if (!produtosService || typeof produtosService.atualizarCatalogoSgm !== 'function') {
+      return res.status(500).json({ error: 'produtosService indisponível no servidor' });
+    }
+    const resultado = await produtosService.atualizarCatalogoSgm(produtos);
+    console.log(`[API /api/produtos/sync] Sincronização concluída: ${resultado.totalRecebidos} produtos recebidos, ${resultado.atualizadosDb} atualizados no Supabase.`);
+    return res.status(200).json(resultado);
+  } catch (err) {
+    console.error('[API /api/produtos/sync] Erro ao sincronizar catálogo:', err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/produtos/catalogo', autenticarWorkerInterno, (req, res) => {
+  try {
+    if (!produtosService) return res.status(500).json({ error: 'produtosService indisponível' });
+    const lista = produtosService.carregarCatalogo(true);
+    return res.status(200).json({
+      total: lista.length,
+      primeirosItens: lista.slice(0, 10),
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/conversa/despausar', autenticarWorkerInterno, async (req, res) => {
   const { telefone } = req.body || {};
   if (telefone) {
@@ -807,18 +871,13 @@ app.post('/api/automacao/ativar', autenticarWorkerInterno, (req, res) => {
   console.log('▶️ [app] Automação ATIVADA GLOBALMENTE via endpoint /api/automacao/ativar');
   res.json({ ok: true, pausado: false, mensagem: 'Automação de atendimento ativada com sucesso.' });
 });
-app.post('/api/produtos/sync', autenticarWorkerInterno, async (req, res) => { try { const lista = req.body.produtos || req.body; const resultado = await produtosService.atualizarCatalogoSgm(lista); res.json({ success: true, ...resultado }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } });
-app.get('/api/produtos/catalogo', autenticarWorkerInterno, (req, res) => { try { const lista = produtosService.carregarCatalogo(); res.json({ success: true, total: lista.length }); } catch (e) { res.status(500).json({ success: false, error: e.message }); } });
-app.get('/api/impressao/proximo', autenticarWorkerInterno, (req, res) => { res.json({ success: true, job: null }); });
-app.post('/api/impressao/status', autenticarWorkerInterno, (req, res) => { res.json({ success: true, ok: true }); });
 
 app.get('/health', (req, res) => {
   res.status(200).json({
-    status: 'ok',
+    status: 'online',
     loja: process.env.NOME_LOJA || 'Açougue e Mercearia Coisas da Roça',
     redisConectado: redisService.isRedisConectado(),
-    bancoConectado: Boolean(db && db.pool),
-    automacoesPausadas: process.env.AUTOMACOES_PAUSADAS === 'true',
+    automacaoPausada: isAutomacaoPausadaGlobal(),
     timestamp: new Date().toISOString(),
   });
 });
