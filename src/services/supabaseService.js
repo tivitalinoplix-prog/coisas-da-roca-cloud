@@ -1,136 +1,238 @@
 /**
  * ============================================================
- * COISAS DA ROÇA - SERVIÇO DE BANCO DE DADOS SUPABASE
+ * COISAS DA ROÇA - SERVIÇO DE BANCO DE DADOS SUPABASE (POSTGRESQL)
  * ============================================================
- * Substitui o PostgreSQL local por Supabase (plano gratuito) na conta do Diogo.
- * 
- * SETUP RÁPIDO:
- * 1. Acessar https://supabase.com com a conta Gmail do Diogo
- * 2. Criar projeto "coisas-da-roca" (região São Paulo)
- * 3. Copiar a SUPABASE_URL e SUPABASE_ANON_KEY do dashboard
- * 4. Colocar no .env
+ * Conexão direta via PostgreSQL (DATABASE_URL) com pool de alta resiliência.
+ * Elimina 100% a dependência de SUPABASE_ANON_KEY e chamadas REST lentas.
  * ============================================================
  */
 
-const fs = require('fs');
-const path = require('path');
+const { pool } = require('../database');
 
 const SUPABASE_URL = process.env.SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY || '';
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || '';
-
-// Usa a service key se disponível, senão anon key
-const AUTH_KEY = SUPABASE_SERVICE_KEY || SUPABASE_ANON_KEY;
 
 /**
- * Wrapper minimalista para chamadas REST do Supabase (sem SDK externo).
- * O Supabase expõe uma API REST via PostgREST, então basta fetch.
- */
-async function supabaseRequest(tableName, method = 'GET', body = null, queryParams = '') {
-  if (!SUPABASE_URL || !AUTH_KEY) {
-    console.warn('[Supabase] ⚠️ Credenciais não configuradas. Operando em modo offline (store.json local).');
-    return null;
-  }
-
-  const url = `${SUPABASE_URL}/rest/v1/${tableName}${queryParams ? '?' + queryParams : ''}`;
-  const headers = {
-    'apikey': AUTH_KEY,
-    'Authorization': `Bearer ${AUTH_KEY}`,
-    'Content-Type': 'application/json',
-    'Prefer': method === 'POST' ? 'return=representation' : 'return=minimal'
-  };
-
-  try {
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: body ? JSON.stringify(body) : undefined
-    });
-
-    if (!res.ok) {
-      const errText = await res.text();
-      console.error(`[Supabase] Erro ${method} ${tableName}:`, res.status, errText);
-      return null;
-    }
-
-    if (method === 'DELETE' || res.status === 204) return { success: true };
-    return await res.json();
-  } catch (err) {
-    console.error(`[Supabase] Erro de rede em ${method} ${tableName}:`, err.message);
-    return null;
-  }
-}
-
-// ============================================================
-// FUNÇÕES DE NEGÓCIO
-// ============================================================
-
-/**
- * Registra ou atualiza um cliente no Supabase.
+ * Registra ou atualiza um cliente no Supabase (PostgreSQL direto).
  */
 async function upsertCliente({ telefone, nome, bairro }) {
-  return supabaseRequest('clientes', 'POST', {
-    telefone,
-    nome: nome || null,
-    bairro: bairro || null,
-    ultima_compra: new Date().toISOString(),
-    opt_out: false
-  }, 'on_conflict=telefone');
+  if (!telefone) return null;
+  const cleanPhone = String(telefone).replace(/[^0-9]/g, '');
+  const telFormatado = cleanPhone || String(telefone).trim();
+  const nomeSeguro = (nome && nome.trim() && nome.trim() !== 'Cliente') ? nome.trim() : null;
+  const bairroSeguro = bairro && bairro.trim() ? bairro.trim() : null;
+
+  try {
+    const res = await pool.query(
+      `INSERT INTO clientes (telefone, nome, bairro, ultima_compra, opt_out)
+       VALUES ($1, $2, $3, NOW(), false)
+       ON CONFLICT (telefone) 
+       DO UPDATE SET 
+         nome = COALESCE(EXCLUDED.nome, clientes.nome),
+         bairro = COALESCE(EXCLUDED.bairro, clientes.bairro),
+         ultima_compra = NOW()
+       RETURNING *;`,
+      [telFormatado, nomeSeguro, bairroSeguro]
+    );
+    return res.rows[0];
+  } catch (err) {
+    console.error('[Supabase PostgreSQL] Erro em upsertCliente:', err.message);
+    return null;
+  }
 }
 
 /**
- * Registra um novo pedido vindo da IA de atendimento.
+ * Registra um novo pedido no Supabase (PostgreSQL direto).
  */
-async function registrarPedido({ clienteTelefone, itensAcougue, itensMercearia, formaPagamento, respostaIA }) {
-  return supabaseRequest('pedidos', 'POST', {
-    cliente_telefone: clienteTelefone,
-    itens_acougue: itensAcougue || [],
-    itens_mercearia: itensMercearia || [],
-    forma_pagamento: formaPagamento || 'A combinar',
-    resposta_ia: respostaIA || '',
-    status: 'RECEBIDO',
-    criado_em: new Date().toISOString()
-  });
+async function registrarPedido({ clienteTelefone, itensAcougue, itensMercearia, formaPagamento, respostaIA, valorEstimado }) {
+  if (!clienteTelefone) return null;
+  try {
+    const res = await pool.query(
+      `INSERT INTO pedidos (
+         cliente_telefone, itens_acougue, itens_mercearia,
+         valor_estimado, forma_pagamento, resposta_ia,
+         status, criado_em
+       ) VALUES ($1, $2, $3, $4, $5, $6, 'RECEBIDO', NOW())
+       RETURNING *;`,
+      [
+        String(clienteTelefone).trim(),
+        JSON.stringify(itensAcougue || []),
+        JSON.stringify(itensMercearia || []),
+        valorEstimado ? Number(valorEstimado) : null,
+        formaPagamento || 'A combinar',
+        respostaIA || ''
+      ]
+    );
+    return res.rows[0];
+  } catch (err) {
+    console.error('[Supabase PostgreSQL] Erro em registrarPedido:', err.message);
+    return null;
+  }
 }
 
 /**
- * Registra cada interação de conversa para histórico e treinamento futuro da IA.
+ * Registra interação de conversa para histórico e auditoria (PostgreSQL direto).
  */
 async function registrarConversa({ clienteTelefone, nomeCliente, mensagemCliente, tipoMensagem, respostaIA, tempoRespostaMs }) {
-  return supabaseRequest('conversas', 'POST', {
-    cliente_telefone: clienteTelefone,
-    nome_cliente: nomeCliente || null,
-    mensagem_cliente: mensagemCliente || '',
-    tipo_mensagem: tipoMensagem || 'texto',
-    resposta_ia: respostaIA || '',
-    tempo_resposta_ms: tempoRespostaMs || 0,
-    criado_em: new Date().toISOString()
-  });
+  if (!clienteTelefone) return null;
+  try {
+    const res = await pool.query(
+      `INSERT INTO conversas (
+         cliente_telefone, nome_cliente, mensagem_cliente,
+         tipo_mensagem, resposta_ia, tempo_resposta_ms, criado_em
+       ) VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       RETURNING id;`,
+      [
+        String(clienteTelefone).trim(),
+        nomeCliente || 'Cliente',
+        mensagemCliente || '',
+        tipoMensagem || 'texto',
+        respostaIA || '',
+        tempoRespostaMs || 0
+      ]
+    );
+    return res.rows[0];
+  } catch (err) {
+    console.error('[Supabase PostgreSQL] Erro em registrarConversa:', err.message);
+    return null;
+  }
 }
 
 /**
  * Verifica se o cliente deu opt-out (pediu para parar).
  */
 async function isClienteOptOut(telefone) {
-  const result = await supabaseRequest('clientes', 'GET', null, `telefone=eq.${telefone}&select=opt_out`);
-  if (result && result.length > 0) {
-    return result[0].opt_out === true;
+  if (!telefone) return false;
+  const cleanPhone = String(telefone).replace(/[^0-9]/g, '');
+  try {
+    const res = await pool.query(
+      `SELECT opt_out FROM clientes WHERE telefone = $1 LIMIT 1;`,
+      [cleanPhone]
+    );
+    return res.rows[0]?.opt_out === true;
+  } catch (err) {
+    console.error('[Supabase PostgreSQL] Erro em isClienteOptOut:', err.message);
+    return false;
   }
-  return false;
 }
 
 /**
  * Marca opt-out para o cliente.
  */
 async function marcarOptOut(telefone) {
-  return supabaseRequest('clientes', 'PATCH', { opt_out: true }, `telefone=eq.${telefone}`);
+  if (!telefone) return false;
+  const cleanPhone = String(telefone).replace(/[^0-9]/g, '');
+  try {
+    await pool.query(
+      `UPDATE clientes SET opt_out = true WHERE telefone = $1;`,
+      [cleanPhone]
+    );
+    return true;
+  } catch (err) {
+    console.error('[Supabase PostgreSQL] Erro em marcarOptOut:', err.message);
+    return false;
+  }
 }
 
 /**
  * Busca pedidos recentes de um cliente.
  */
 async function buscarPedidosRecentes(telefone, limite = 5) {
-  return supabaseRequest('pedidos', 'GET', null, `cliente_telefone=eq.${telefone}&order=criado_em.desc&limit=${limite}`);
+  if (!telefone) return [];
+  const cleanPhone = String(telefone).replace(/[^0-9]/g, '');
+  try {
+    const res = await pool.query(
+      `SELECT * FROM pedidos 
+       WHERE cliente_telefone = $1 
+       ORDER BY criado_em DESC 
+       LIMIT $2;`,
+      [cleanPhone, limite]
+    );
+    return res.rows;
+  } catch (err) {
+    console.error('[Supabase PostgreSQL] Erro em buscarPedidosRecentes:', err.message);
+    return [];
+  }
+}
+
+/**
+ * Adaptador de compatibilidade para chamadas genéricas legadas (supabaseRequest).
+ * Mapeia tabelas comuns diretamente para SQL de alta performance.
+ */
+async function supabaseRequest(tableName, method = 'GET', body = null, queryParams = '') {
+  const table = String(tableName || '').toLowerCase().trim();
+  const metodo = String(method || 'GET').toUpperCase();
+
+  try {
+    if (metodo === 'GET') {
+      if (table === 'clientes') {
+        const matchTel = queryParams.match(/telefone=eq\.([^&]+)/);
+        if (matchTel) {
+          const tel = matchTel[1].replace(/[^0-9]/g, '');
+          const res = await pool.query('SELECT * FROM clientes WHERE telefone = $1 LIMIT 1', [tel]);
+          return res.rows;
+        }
+        const res = await pool.query('SELECT * FROM clientes ORDER BY ultima_compra DESC LIMIT 50');
+        return res.rows;
+      }
+
+      if (table === 'pedidos') {
+        const matchData = queryParams.match(/criado_em=gte\.([^&]+)/);
+        if (matchData) {
+          const dataFiltro = decodeURIComponent(matchData[1]);
+          const res = await pool.query('SELECT * FROM pedidos WHERE criado_em >= $1 ORDER BY criado_em DESC', [dataFiltro]);
+          return res.rows;
+        }
+        const matchTel = queryParams.match(/cliente_telefone=eq\.([^&]+)/);
+        if (matchTel) {
+          const tel = matchTel[1].replace(/[^0-9]/g, '');
+          const res = await pool.query('SELECT * FROM pedidos WHERE cliente_telefone = $1 ORDER BY criado_em DESC LIMIT 20', [tel]);
+          return res.rows;
+        }
+        const res = await pool.query('SELECT * FROM pedidos ORDER BY criado_em DESC LIMIT 50');
+        return res.rows;
+      }
+    }
+
+    if (metodo === 'POST' && body) {
+      if (table === 'clientes') {
+        const row = await upsertCliente(body);
+        return row ? [row] : null;
+      }
+      if (table === 'pedidos') {
+        const row = await registrarPedido(body);
+        return row ? [row] : null;
+      }
+      if (table === 'conversas') {
+        const row = await registrarConversa(body);
+        return row ? [row] : null;
+      }
+    }
+  } catch (err) {
+    console.error(`[Supabase PostgreSQL] Erro em supabaseRequest (${table}):`, err.message);
+  }
+
+  // Fallback REST apenas se credenciais explícitas existirem
+  const authKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY;
+  if (SUPABASE_URL && authKey) {
+    const url = `${SUPABASE_URL}/rest/v1/${tableName}${queryParams ? '?' + queryParams : ''}`;
+    const headers = {
+      'apikey': authKey,
+      'Authorization': `Bearer ${authKey}`,
+      'Content-Type': 'application/json',
+      'Prefer': method === 'POST' ? 'return=representation' : 'return=minimal'
+    };
+    try {
+      const res = await fetch(url, { method, headers, body: body ? JSON.stringify(body) : undefined });
+      if (!res.ok) return null;
+      if (method === 'DELETE' || res.status === 204) return { success: true };
+      return await res.json();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  return null;
 }
 
 module.exports = {

@@ -1,41 +1,11 @@
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const redisService = require('./redisService');
 const {
   buscarProdutosRelevantes,
   formatarCatalogoParaPrompt,
 } = require('./produtosService');
 
 const NOME_LOJA = process.env.NOME_LOJA || 'Açougue e Mercearia Coisas da Roça';
-
-const IDS_TESTADORES = ['998586180', '173679971422247'];
-
-function isTestador(id) {
-const texto = String(id || '');
-return IDS_TESTADORES.some((t) => texto.includes(t));
-}
-
-function isHorarioComercialAberto() {
-const agora = new Date();
-const partes = new Intl.DateTimeFormat('en-US', {
-timeZone: 'America/Sao_Paulo',
-weekday: 'short',
-hour: '2-digit',
-minute: '2-digit',
-hour12: false,
-}).formatToParts(agora);
-const mapa = {};
-for (const p of partes) {
-mapa[p.type] = p.value;
-}
-const dia = mapa.weekday;
-let hora = Number(mapa.hour);
-if (hora === 24) hora = 0;
-const minutos = hora * 60 + Number(mapa.minute);
-const abertura = 7 * 60 + 30;
-if (dia === 'Sun') {
-return minutos >= abertura && minutos < 13 * 60;
-}
-return minutos >= abertura && minutos < 19 * 60 + 30;
-}
 
 function obterChavesGemini() {
   return [
@@ -250,7 +220,7 @@ function mesclarEstadoSessao(sessaoAtual = {}, delta = null) {
   return base;
 }
 
-function extrairMetadadosResposta(textoBruto = '', sessaoAtual = {}, opcoes = {}) {
+function extrairMetadadosResposta(textoBruto = '', sessaoAtual = {}) {
   const bruto = String(textoBruto || '');
 
   const transbordoHumano = /\[TRANSBORDO_ATENDENTE\]/i.test(bruto);
@@ -298,16 +268,8 @@ function extrairMetadadosResposta(textoBruto = '', sessaoAtual = {}, opcoes = {}
         total_estimado: Number(somaItens.toFixed(2)),
         itens: sessaoAtualizada.itens,
       };
-   
-   
     }
   }
-  const idClienteSanitizacao = opcoes?.chatId || opcoes?.clienteId || opcoes?.telefone || opcoes?.perfilCliente?.id || opcoes?.perfilCliente?.telefone || sessaoAtualizada?.chatId || sessaoAtualizada?.clienteId || sessaoAtualizada?.telefone || sessaoAtualizada?.id || '';
-if (pedidoFechado && !isHorarioComercialAberto() && !isTestador(idClienteSanitizacao)) {
-pedidoFechado = false;
-dadosPedido = null;
-}
-  
 
   return {
     textoCliente: sanitizarRespostaWhatsApp(bruto),
@@ -320,7 +282,27 @@ dadosPedido = null;
   };
 }
 
-function construirSystemPrompt({ nomeCliente, catalogoFormatado, perfilCliente, sessaoAtiva, faltasBalcao = [] }) {
+function isHorarioComercialAberto() {
+  const agora = new Date();
+  const opcoes = { timeZone: 'America/Sao_Paulo', hour12: false };
+  const horaStr = agora.toLocaleTimeString('pt-BR', { ...opcoes, hour: '2-digit' });
+  const minutoStr = agora.toLocaleTimeString('pt-BR', { ...opcoes, minute: '2-digit' });
+  const diaSemana = agora.toLocaleDateString('en-US', { ...opcoes, weekday: 'short' });
+
+  const hora = parseInt(horaStr, 10);
+  const minuto = parseInt(minutoStr, 10);
+  const minutosDesdeMeiaNoite = hora * 60 + minuto;
+
+  // Domingo: 07:30 às 13:00 (450 a 780 min)
+  if (diaSemana === 'Sun') {
+    return minutosDesdeMeiaNoite >= 450 && minutosDesdeMeiaNoite <= 780;
+  }
+
+  // Segunda a Sábado: 07:30 às 19:30 (450 a 1170 min)
+  return minutosDesdeMeiaNoite >= 450 && minutosDesdeMeiaNoite <= 1170;
+}
+
+function construirSystemPrompt({ nomeCliente, catalogoFormatado, perfilCliente, sessaoAtiva, faltasBalcao = [], isForaDeExpediente = false }) {
   const primeiroNome = nomeCliente && nomeCliente !== 'Cliente'
     ? String(nomeCliente).trim().split(' ')[0]
     : '';
@@ -329,6 +311,19 @@ function construirSystemPrompt({ nomeCliente, catalogoFormatado, perfilCliente, 
   const regraSaudacao = jaCumprimentou
     ? 'PROIBIDO repetir "Olá", "Boa noite", "Tudo bem" ou qualquer saudação. Vá 100% direto ao ponto (ex: "Anotado, Txai:").'
     : `Esta é a primeira resposta com itens. Seja breve ("Olá${primeiroNome ? ', ' + primeiroNome : ''}! Já anotei:").`;
+
+  const blocoNoturno = isForaDeExpediente ? `
+====================================================================
+MODO FORA DE EXPEDIENTE / ACOLHIMENTO NOTURNO (BALCÃO FECHADO AGORA)
+====================================================================
+ATENÇÃO CRÍTICA: O balcão do açougue e mercearia já encerrou o expediente por hoje.
+Nosso horário de funcionamento é de Segunda a Sábado das 07h30 às 19h30 (Domingo até 13h00).
+DIRETIVAS OBRIGATÓRIAS DESTE MODO:
+1. NUNCA finalize o pedido agora, NUNCA gere a tag [PEDIDO_FECHADO] e NUNCA gere ou prometa envio de chave Pix imediato.
+2. Seja acolhedor e atencioso: explique gentilmente que o balcão já fechou por hoje e que reabriremos amanhã bem cedinho, às 07h30, com carnes frescas selecionadas pelo Diogo.
+3. Diga ao cliente que você já está deixando o pedido dele anotado com prioridade para a equipe separar logo na abertura da manhã.
+4. Mostre o > *Resumo do Pedido* com o aviso: _(Anotado para separação na abertura às 07h30 — valor final confirmado na pesagem de amanhã)_.
+` : '';
 
   const estadoCarrinhoJson = JSON.stringify({
     itens: sessaoAtiva?.itens || [],
@@ -345,6 +340,7 @@ function construirSystemPrompt({ nomeCliente, catalogoFormatado, perfilCliente, 
 Fale como um balconista de confiança: direto, simpático e enxuto (15 a 35 palavras fora da lista). Sem formalismo robótico, sem adjetivos melosos ("vai ficar uma delícia", "com todo carinho"), sem "meu querido(a)" e NUNCA use emoji de trigo. Use apenas 🥩, 👍, 📍, 🛵.
 
 ${regraSaudacao}
+${blocoNoturno}
 
 ====================================================================
 TIPOGRAFIA NATIVA DO WHATSAPP (OBRIGATÓRIA PARA LIMPEZA VISUAL)
@@ -376,6 +372,19 @@ REGRAS DO CARRINHO MULTI-TURN (TOLERÂNCIA ZERO À AMNÉSIA):
    - Se já tem os itens e o endereço, mas falta apenas a forma de pagamento, pergunte a forma de pagamento e adicione [BOTOES_PAGAMENTO] ao final.
    - Se já tem itens, endereço completo e forma de pagamento, mostre o > *Resumo do Pedido* limpo e peça confirmação para enviar ao balcão, adicionando [BOTOES_CONFIRMACAO] ao final.
 8. ITEM AUSENTE OU ESGOTADO: Se o item não existir no SGM ou estiver na lista de esgotados, avise com naturalidade que vai confirmar no balcão e adicione [TRANSBORDO_ATENDENTE].
+9. MAPEAMENTO CULINÁRIO INTELIGENTE (SINÔNIMOS DE BALCÃO):
+   - "Carne moída" / "Carne moída de 1ª" ➔ Mapeie para Patinho Bovino (ou Chã Bovino). Se o cliente pedir moída de 2ª, use Acém Bovino.
+   - "Chã de dentro" / "Carne em tiras" ➔ Mapeie para Chã Bovino KG (adicionando observação de corte: "Em tiras").
+   - "Batata" ➔ Mapeie para Batata Inglesa KG.
+   - "Farinha de mandioca" / "Farinha de trigo" ➔ Mapeie para os pacotes de 1kg disponíveis no catálogo (ex: Farinha Rosa/Yasmim e Farinha Dona Benta/Boa Sorte).
+   - "Óleo" ➔ Mapeie para Óleo de Soja 900ml (Soya/Liza).
+   - "Rocambole" ➔ Mapeie para Rocambole de Frango Recheado do catálogo.
+   - NUNCA afirme que esses produtos "não constam no catálogo" se houver itens correspondentes no CATÁLOGO SGM fornecido abaixo!
+10. RELEITURA E RECUPERAÇÃO DE ITENS (TOLERÂNCIA ZERO À OMISSÃO):
+    - Se o cliente disser que "está faltando item", "releia o pedido" ou enviar uma lista com vários itens:
+      LEIA CADA LINHA DA LISTA COM RIGOR TOTAL.
+      É PROIBIDO dizer que "adicionou com o gerente" sem de fato acrescentar os itens faltantes no resumo e no JSON!
+      Adicione TODOS os itens solicitados pelo cliente que faltavam, preservando rigorosamente as quantidades exatas de cada linha (ex: 8kg para o que foi pedido 8kg, 3kg para o que foi pedido 3kg).
 
 ====================================================================
 SAÍDA ESTRUTURADA OBRIGATÓRIA EM TODO TURNO (INVISÍVEL AO CLIENTE)
@@ -519,22 +528,8 @@ async function processarMensagemReceptiva(mensagemCliente, sessaoOuHistorico = {
   const temEnderecoValido = validarEnderecoEntrega(sessaoAtiva.endereco).valido;
   const isConfirmacaoCurta = /^(1|sim|s|ok|confirmar|confirmo|confirmado|pode fechar|fechar|fechado|pode mandar|manda|isso|isso mesmo|perfeito|certo|👍+|✅+|☑️+|✔️+|🥩+|🙏+|👏+|💯+)$/i.test(limpoAtalho);
 
-  if (temItensNoCarrinho && temEnderecoValido && isConfirmacaoCurta)  {
-const idCliente = opcoes.chatId || opcoes.clienteId || opcoes.telefone || sessaoAtiva.chatId || sessaoAtiva.clienteId || sessaoAtiva.telefone || sessaoAtiva.id || perfilCliente?.id || perfilCliente?.telefone || '';
-if (!isHorarioComercialAberto() && !isTestador(idCliente)) {
-return {
-resposta: '📝 Seu pedido e endereço já ficaram anotados aqui no balcão! Como estamos fora do horário de expediente agora, assim que abrirmos às *07h30* nossa equipe já pesa os seus cortes na balança e te envia o valor exato com o Pix para confirmar a entrega, combinado? 🥩👍',
-transbordoHumano: false,
-pedidoFechado: false,
-enviarLocalizacao: false,
-dadosPedido: null,
-sessaoAtualizada: { ...sessaoAtiva, boasVindasEnviada: true },
-enviarLogo: false,
-tipoBotoes: null,
-produtosConsultados: [],
-};
-}
-      const codigoPedido = String(Math.floor(100 + Math.random() * 900));
+  if (temItensNoCarrinho && temEnderecoValido && isConfirmacaoCurta) {
+    const codigoPedido = String(Math.floor(100 + Math.random() * 900));
     const somaItens = sessaoAtiva.itens.reduce((acc, it) => acc + (Number(it.subtotal) || 0), 0);
     const pgtoFinal = sessaoAtiva.forma_pagamento || perfilCliente?.forma_pagamento || 'Pix';
     const listaResumo = sessaoAtiva.itens.map((it) => `• *${it.quantidade}${it.unidade} - ${it.nome}* (_${it.observacao_corte || 'Padrão'}_) — *R$ ${Number(it.subtotal).toFixed(2).replace('.', ',')}*`).join('\n');
@@ -605,9 +600,28 @@ produtosConsultados: [],
 
   // 3. Busca produtos no SGM incluindo os nomes dos itens já no carrinho para manter ancoragem de preço
   const nomesItensCarrinho = (sessaoAtiva.itens || []).map((i) => i.nome).join(' ');
-  const contextoBusca = `${textoAtual} ${nomesItensCarrinho}`.trim();
+
+  // Se a mensagem atual for curta ou de revisão/reclamação ("faltando", "releia", áudio de correção), busca termos das mensagens anteriores
+  let textoHistoricoRelevante = '';
+  const ehMensagemRevisao = /(falta|faltando|releia|reler|esqueceu|cade|resto|conferir|audio)/i.test(textoAtual) || textoAtual.length < 50;
+  if (ehMensagemRevisao && Array.isArray(historicoMensagens)) {
+    const msgsCliente = historicoMensagens
+      .filter((m) => m && (m.role === 'user' || m.fromMe === false))
+      .slice(-3)
+      .map((m) => m.content || m.texto || m.body || '')
+      .join('\n');
+    textoHistoricoRelevante = msgsCliente;
+  }
+
+  const contextoBusca = `${textoAtual}\n${textoHistoricoRelevante}\n${nomesItensCarrinho}`.trim();
   const produtosRelevantes = buscarProdutosRelevantes(contextoBusca, historicoMensagens);
   const catalogoFormatado = formatarCatalogoParaPrompt(produtosRelevantes);
+
+  const aberto = isHorarioComercialAberto();
+  const testador = redisService && typeof redisService.isNumeroTestador === 'function'
+    ? redisService.isNumeroTestador(telefoneReal || '')
+    : false;
+  const isForaDeExpediente = !aberto && !testador;
 
   const systemInstruction = construirSystemPrompt({
     nomeCliente,
@@ -615,6 +629,7 @@ produtosConsultados: [],
     perfilCliente,
     sessaoAtiva,
     faltasBalcao,
+    isForaDeExpediente,
   });
 
   const contents = [];
@@ -649,7 +664,12 @@ produtosConsultados: [],
     const metadados = extrairMetadadosResposta(respostaBruta, {
       ...sessaoAtiva,
       boasVindasEnviada: true,
-    }, opcoes);
+    });
+
+    if (isForaDeExpediente) {
+      metadados.pedidoFechado = false;
+      metadados.tipoBotoes = null;
+    }
 
     return {
       resposta: metadados.textoCliente,
@@ -680,6 +700,7 @@ produtosConsultados: [],
 }
 
 module.exports = {
+  isHorarioComercialAberto,
   isSaudacaoPura,
   montarMensagemBoasVindas,
   validarEnderecoEntrega,

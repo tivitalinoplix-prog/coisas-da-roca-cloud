@@ -67,13 +67,17 @@ function montarComandaEscPos(pedido) {
 
   escpos += COMANDOS.INIT;
 
+  // =========================================================================
   // VIA ÚNICA: CAIXA / BALCÃO / EXPEDIÇÃO (ÁREA LIVRE DE ESCRITA)
+  // =========================================================================
   appendTexto('COISAS DA ROCA - PEDIDO WHATSAPP', 'CENTER', true, 'DOUBLE_HEIGHT');
   appendTexto('================================================', 'CENTER', false, 'NORMAL');
   appendTexto(`PEDIDO : #${pedido.pedidoId}`, 'LEFT', true, 'DOUBLE_HEIGHT');
   appendTexto(`DATA   : ${dataHora}`, 'LEFT', false, 'NORMAL');
   appendTexto(`CLIENTE: ${pedido.clienteNome}`, 'LEFT', true, 'DOUBLE_HEIGHT');
-  appendTexto(`CONTATO: ${pedido.clienteTelefone}`, 'LEFT', false, 'NORMAL');
+  if (pedido.clienteTelefone) {
+    appendTexto(`CONTATO: ${pedido.clienteTelefone}`, 'LEFT', false, 'NORMAL');
+  }
   appendTexto(`ENTREGA: ${pedido.enderecoEntrega || 'Retirada no Balcao'}`, 'LEFT', true, 'NORMAL');
   appendTexto(`PGTO   : ${pedido.formaPagamento || 'A combinar'}`, 'LEFT', true, 'DOUBLE_HEIGHT');
   appendTexto('------------------------------------------------', 'CENTER', false, 'NORMAL');
@@ -89,16 +93,18 @@ function montarComandaEscPos(pedido) {
 
   appendTexto('------------------------------------------------', 'CENTER', false, 'NORMAL');
   appendTexto('PESO REAL: _______________  VALOR R$: __________', 'LEFT', true, 'NORMAL');
-appendTexto('', 'LEFT', false, 'NORMAL');
-appendTexto('ANOTACOES LIVRES:', 'LEFT', true, 'NORMAL');
-appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
-appendTexto('', 'LEFT', false, 'NORMAL');
-appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
-appendTexto('', 'LEFT', false, 'NORMAL');
-appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
+  appendTexto('', 'LEFT', false, 'NORMAL');
+  appendTexto('ANOTACOES LIVRES:', 'LEFT', true, 'NORMAL');
+  appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
+  appendTexto('', 'LEFT', false, 'NORMAL');
+  appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
+  appendTexto('', 'LEFT', false, 'NORMAL');
+  appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
   appendTexto('================================================', 'CENTER', false, 'NORMAL');
 
-  escpos += '\n\n\n' + COMANDOS.CUT_FULL;
+  escpos += '\n\n\n';
+  escpos += COMANDOS.BEEP;
+  escpos += COMANDOS.CUT_FULL;
 
   return escpos;
 }
