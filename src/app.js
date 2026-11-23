@@ -821,7 +821,42 @@ app.post('/api/expediente/fechamento', autenticarWorkerInterno, async (req, res)
   }
 });
 
-app.get('/worker-caixa1.ps1', autenticarWorkerInterno, (req, res) => {
+app.get('/instalar-caixa1', (req, res) => {
+  const scriptInstalador = `# Instalador Automatico Caixa 1 - Coisas da Roca
+$ErrorActionPreference = 'Stop'
+Write-Host "Iniciando instalacao do Worker Bematech no Caixa 1..." -ForegroundColor Cyan
+
+$pasta = "C:\\CoisasDaRoca"
+if (!(Test-Path $pasta)) { New-Item -ItemType Directory -Path $pasta -Force | Out-Null }
+
+$urlWorker = "https://coisasdaroca-core-production.up.railway.app/worker-caixa1.ps1"
+$destinoWorker = "$pasta\\worker_impressao_caixa1.ps1"
+
+Write-Host "Baixando script do worker..." -ForegroundColor Yellow
+Invoke-WebRequest -Uri $urlWorker -OutFile $destinoWorker -UseBasicParsing
+
+$vbsContent = 'CreateObject("Wscript.Shell").Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""C:\\CoisasDaRoca\\worker_impressao_caixa1.ps1""", 0, False'
+$destinoVbs = "$pasta\\iniciar_worker_caixa1_invisivel.vbs"
+Set-Content -Path $destinoVbs -Value $vbsContent -Encoding ASCII
+
+$startup = [Environment]::GetFolderPath('Startup')
+Copy-Item $destinoVbs "$startup\\iniciar_worker_caixa1_invisivel.vbs" -Force
+
+Write-Host "Iniciando worker em segundo plano..." -ForegroundColor Yellow
+Start-Process "wscript.exe" "$destinoVbs"
+
+Write-Host ""
+Write-Host "=================================================================" -ForegroundColor Green
+Write-Host " [SUCESSO] Worker da Bematech MP-100S TH instalado no Caixa 1!" -ForegroundColor Green
+Write-Host " O worker ja esta rodando em segundo plano e vai iniciar" -ForegroundColor Green
+Write-Host " automaticamente sempre que o computador for ligado." -ForegroundColor Green
+Write-Host "=================================================================" -ForegroundColor Green
+`;
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  return res.send(scriptInstalador);
+});
+
+app.get('/worker-caixa1.ps1', (req, res) => {
   const candidatos = [
     path.resolve(__dirname, '../../scripts/worker_impressao_caixa1.ps1'),
     path.resolve(__dirname, '../scripts/worker_impressao_caixa1.ps1'),
