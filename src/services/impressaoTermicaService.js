@@ -82,18 +82,29 @@ function montarComandaEscPos(pedido) {
   appendTexto(`PGTO   : ${pedido.formaPagamento || 'A combinar'}`, 'LEFT', true, 'DOUBLE_HEIGHT');
   appendTexto('------------------------------------------------', 'CENTER', false, 'NORMAL');
 
+  const temItemPesavel = (pedido.itens || []).some(i => {
+    const d = (i.descricao || '').toLowerCase();
+    const q = (i.quantidade || '').toLowerCase();
+    return q.includes('kg') || /(carne|bife|moida|moída|alcatra|contra|frango|linguica|linguiça|costela|picanha|bovino|suino|suíno)/i.test(d);
+  });
+
   (pedido.itens || []).forEach((item, idx) => {
     const desc = `${idx + 1}. ${sanitizarParaTermica(item.descricao)}`;
     const qtdStr = sanitizarParaTermica(item.quantidade || '1 un');
     appendTexto(formatarLinhaDupla(desc, qtdStr, 48), 'LEFT', true, 'NORMAL');
     if (item.preparo) {
-      appendTexto(`   >> CORTE/OBS: ${sanitizarParaTermica(item.preparo)}`, 'LEFT', true, 'NORMAL');
+      const isCarne = /(carne|bife|moida|moída|alcatra|contra|frango|linguica|linguiça|costela|picanha|bovino|suino|suíno)/i.test(item.descricao || '') ||
+                      /(bife|moer|cortar|limpar|iscas|picadinho|cubos|peca|peça)/i.test(item.preparo || '');
+      const rotulo = isCarne ? '>> CORTE/OBS:' : '>> OBS:';
+      appendTexto(`   ${rotulo} ${sanitizarParaTermica(item.preparo)}`, 'LEFT', true, 'NORMAL');
     }
   });
 
   appendTexto('------------------------------------------------', 'CENTER', false, 'NORMAL');
-  appendTexto('PESO REAL: _______________  VALOR R$: __________', 'LEFT', true, 'NORMAL');
-  appendTexto('', 'LEFT', false, 'NORMAL');
+  if (temItemPesavel) {
+    appendTexto('PESO REAL: _______________  VALOR R$: __________', 'LEFT', true, 'NORMAL');
+    appendTexto('', 'LEFT', false, 'NORMAL');
+  }
   appendTexto('ANOTACOES LIVRES:', 'LEFT', true, 'NORMAL');
   appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
   appendTexto('', 'LEFT', false, 'NORMAL');

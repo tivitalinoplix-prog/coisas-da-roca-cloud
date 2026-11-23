@@ -679,9 +679,12 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
         return;
       }
 
-      if (textoRecebido.toLowerCase().startsWith('#imprimir') || textoRecebido.toLowerCase().startsWith('#comanda')) {
-        const payloadManual = textoRecebido.replace(/^#(imprimir|comanda)\s*/i, '').trim();
-        console.log(`[app] 🖨️ Comando manual de impressão do atendente para ${chaveCanonica}: "${payloadManual}"`);
+      const isComandoManual = textoRecebido.toLowerCase().startsWith('#imprimir') || textoRecebido.toLowerCase().startsWith('#comanda');
+      const isFechamentoNatural = /(pedido\s+confirmado|confirmar\s+pedido|pedido\s+anotado|comanda\s+enviada)/i.test(textoRecebido);
+
+      if (isComandoManual || isFechamentoNatural) {
+        const payloadManual = isComandoManual ? textoRecebido.replace(/^#(imprimir|comanda)\s*/i, '').trim() : '';
+        console.log(`[app] 🖨️ Disparo de comanda do atendente (${isFechamentoNatural ? 'frase natural' : 'comando manual'}) para ${chaveCanonica}: "${payloadManual}"`);
         try {
           if (impressaoTermicaService && typeof impressaoTermicaService.enfileirarImpressaoPedido === 'function') {
             let desc = payloadManual;
