@@ -26,25 +26,7 @@ function normalizarMensagemConfirmacao(texto = '', temHistorico = false) {
 }
 
 function obterResumoFreteMacaeZesto() {
-  const caminhos = [
-    path.resolve(__dirname, '../../config/bairros_macae_frete.json'),
-    path.resolve(__dirname, '../../../config/bairros_macae_frete.json'),
-    path.resolve(process.cwd(), 'config/bairros_macae_frete.json'),
-    path.resolve(process.cwd(), 'app/config/bairros_macae_frete.json'),
-  ];
-  for (const p of caminhos) {
-    if (fs.existsSync(p)) {
-      try {
-        const cfg = JSON.parse(fs.readFileSync(p, 'utf-8'));
-        const min = Number(cfg?.regras_especiais?.frete_gratis_valor_minimo || 200).toFixed(2).replace('.', ',');
-        const lista = Object.entries(cfg.bairros || {})
-          .map(([b, v]) => b + ': R$ ' + Number(v).toFixed(2).replace('.', ','))
-          .join(' | ');
-        return 'FRETE GRÁTIS em compras acima de R$ ' + min + '. Taxas por bairro em Macaé: ' + lista;
-      } catch (_) {}
-    }
-  }
-  return 'FRETE GRÁTIS acima de R$ 200,00. Taxas Macaé: Centro R$ 5,00 | Imbetiba R$ 8,00 | Cavaleiros/Miramar/Glória/Aroeira R$ 13,00 | Aeroporto/Granja R$ 15,00 | Ajuda/Imboassica R$ 25,00 | Vale das Palmeiras R$ 30,00.';
+  return 'FRETE GRÁTIS em compras a partir de R$ 200,00! Taxa de entrega motoboy em Macaé: Centro R$ 3,00 | Bairros urbanos (Imbetiba, Cavaleiros, Aroeira, Glória, etc.) R$ 5,00 | Bairros mais distantes R$ 7,00 a R$ 8,00. NUNCA cobre frete abusivo de R$ 15,00.';
 }
 
 function selecionarModelosSwarm(textoMensagem = '', historico = []) {
@@ -63,22 +45,26 @@ function selecionarModelosSwarm(textoMensagem = '', historico = []) {
     txt.length >= 160 ||
     (txt.includes('[áudio') && txt.length >= 110);
 
+  // Modelos com cota livre (1.500 requisições/dia) evitando o 429 de 20 reqs/dia do preview
+  const maestroPrincipal = process.env.GEMINI_MODEL_MAESTRO || 'gemini-2.5-flash';
+  const executorRapido = process.env.GEMINI_MODEL_EXECUTOR || 'gemini-2.5-flash-lite';
+
   if (temMultiplosPesos || temTrocaOuRemocao || isFotoListaOuAudioLongo || qtdTurnos >= 6) {
-    console.log('[Swarm Router] Turno COMPLEXO -> Maestro (gemini-3.5-flash)');
+    console.log('[Swarm Router] Turno COMPLEXO -> Maestro (' + maestroPrincipal + ')');
     return [
-      process.env.GEMINI_MODEL_MAESTRO || 'gemini-3.5-flash',
-      'gemini-3.5-flash-lite',
-      'gemini-flash-lite-latest',
-      'gemini-3-flash-preview',
+      maestroPrincipal,
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+      'gemini-2.5-flash-lite'
     ];
   }
 
-  console.log('[Swarm Router] Turno PADRÃO -> Executor Rápido (gemini-3.5-flash-lite)');
+  console.log('[Swarm Router] Turno PADRÃO -> Executor Rápido (' + executorRapido + ')');
   return [
-    process.env.GEMINI_MODEL_EXECUTOR || 'gemini-3.5-flash-lite',
-    'gemini-3.5-flash',
-    'gemini-flash-lite-latest',
-    'gemini-3-flash-preview',
+    executorRapido,
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-1.5-flash'
   ];
 }
 
@@ -504,7 +490,12 @@ REGRAS DO CARRINHO MULTI-TURN (TOLERÂNCIA ZERO À AMNÉSIA):
 3. NOTA DE BALANÇA: Quando houver item por KG, coloque UMA única vez abaixo do subtotal:
    _Valores das carnes são estimados; o valor exato sai na balança com o cupom._
 4. ANCORAGEM NO SGM: Use EXCLUSIVAMENTE produtos e preços do CATÁLOGO SGM abaixo. Nunca invente marcas ou valores.
-5. ÁGUA MINERAL 20L: Sempre priorize e informe primeiro o preço do *Refil/Reposição* (troca do galão vazio) antes do galão completo, e pergunte se o cliente já possui o vasilhame vazio para troca.
+5. ÁGUA MINERAL 20L (TABELA OFICIAL DE PREÇOS):
+   - REFIL/REPOSIÇÃO Areia Branca 20L: R$ 13,00 (troca do galão vazio).
+   - REFIL/REPOSIÇÃO Serra do Segredo 20L: R$ 13,50 (troca do galão vazio).
+   - GALÃO COMPLETO 20L (Vasilhame Novo + Água): R$ 34,50 / R$ 35,50.
+   - 🛑 REGRA CRÍTICA: NÃO EXISTE ÁGUA DE R$ 15,00 NO COISAS DA ROÇA! JAMAIS informe, cobre ou mencione R$ 15,00 para água mineral.
+   - Para entrega de galão de água, a taxa de entrega da loja é a taxa padrão (R$ 3 a R$ 5), NUNCA R$ 15,00.
 6. ENDEREÇO OFICIAL DA LOJA E LOCALIZAÇÃO:
    - Nosso endereço oficial é SEMPRE "${ENDERECO_OFICIAL_LOJA}". Se o cliente pedir o endereço ou localização da loja para retirada, informe exatamente "${ENDERECO_OFICIAL_LOJA}" e adicione [ENVIAR_LOCALIZACAO]. NUNCA invente outro endereço ou bairro diferente.
    - Para entrega em domicílio em Macaé, exija *Rua, Número e Bairro* (nunca aceite só "Macaé").
@@ -526,9 +517,10 @@ REGRAS DO CARRINHO MULTI-TURN (TOLERÂNCIA ZERO À AMNÉSIA):
       LEIA CADA LINHA DA LISTA COM RIGOR TOTAL.
       É PROIBIDO dizer que "adicionou com o gerente" sem de fato acrescentar os itens faltantes no resumo e no JSON!
       Adicione TODOS os itens solicitados pelo cliente que faltavam, preservando rigorosamente as quantidades exatas de cada linha (ex: 8kg para o que foi pedido 8kg, 3kg para o que foi pedido 3kg).
-11. FRETE MACAÉ, FRETE GRÁTIS R$ 200 E CONFIRMAÇÃO 1/✅:
-    - Tabela de Frete Macaé: ${obterResumoFreteMacaeZesto()}
-    - Se o total estimado dos produtos atingir ou passar de *R$ 200,00* (como no exemplo de R$ 294,92), destaque no resumo: *🚚 Frete: GRÁTIS (pedido acima de R$ 200,00)*! Se ficar entre R$ 145,00 e R$ 199,99, mostre quanto falta para ganhar *Frete Grátis*. Caso contrário, exiba a taxa do bairro do cliente.
+11. POLÍTICA DE FRETE MACAÉ (BARATINHO & FRETE GRÁTIS R$ 200):
+    - Se o total estimado dos produtos atingir ou passar de *R$ 200,00*: *🚚 Frete: GRÁTIS por nossa conta!*
+    - Se for abaixo de R$ 200,00: informe a taxa padrão de entrega da loja (R$ 3,00 Centro / R$ 5,00 bairros urbanos de Macaé).
+    - 🛑 NUNCA cobre frete de R$ 15,00 ou R$ 25,00! Para entregas comuns ou de água em Macaé, a taxa é R$ 3 a R$ 5.
     - Quando o cliente responder "1", "✅", "sim", "ok" ou "[CONFIRMAÇÃO DO CLIENTE]" após você ter exibido o Resumo do Pedido com opções "1 - Confirmar Pedido / 2 - Ajustar Itens", JAMAIS diga que não encontrou o item no catálogo! Feche o pedido imediatamente com [PEDIDO_FECHADO] e gere o código de 3 dígitos em crase (ex: \`Pedido #314\`).
     - Se a mensagem vier com "[Foto de lista de compras enviada pelo cliente]:", anote todos os itens extraídos da foto no carrinho.
 

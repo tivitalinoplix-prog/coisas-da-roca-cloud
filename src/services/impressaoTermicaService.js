@@ -112,10 +112,11 @@ function montarComandaEscPos(pedido) {
     appendTexto(formatarLinhaDupla(desc, qtdStr, 48), 'LEFT', true, 'DOUBLE_HEIGHT');
 
     const pesavel = isItemPesavelKg(item);
-    const prep = item.preparo || item.observacao_corte || item.obs;
+        const prep = item.preparo || item.observacao_corte || item.obs;
     if (prep && !/^(padrao|padrão|conferir|normal)$/i.test(String(prep).trim())) {
-      const prefixo = pesavel ? '>> Preparo' : '>> OBS';
-      appendTexto(`   ${prefixo}: ${sanitizarParaTermica(prep)}`, 'LEFT', false, 'NORMAL');
+      const prefixo = pesavel ? '>> CORTE' : '>> OBS';
+      // Destaque em letras grandes (DOUBLE_HEIGHT + BOLD) para visualização clara na bancada
+      appendTexto(`   ${prefixo}: ${sanitizarParaTermica(prep).toUpperCase()}`, 'LEFT', true, 'DOUBLE_HEIGHT');
     }
     if (pesavel) {
       appendTexto('   PESO REAL: ___________  VALOR R$: ___________', 'LEFT', false, 'NORMAL');
@@ -127,15 +128,11 @@ function montarComandaEscPos(pedido) {
     appendTexto('PESO REAL: _______________  VALOR R$: __________', 'LEFT', true, 'NORMAL');
     appendTexto('', 'LEFT', false, 'NORMAL');
   }
-  appendTexto('ANOTACOES LIVRES:', 'LEFT', true, 'NORMAL');
-  appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
-  appendTexto('', 'LEFT', false, 'NORMAL');
-  appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
-  appendTexto('', 'LEFT', false, 'NORMAL');
-  appendTexto('________________________________________________', 'LEFT', false, 'NORMAL');
+    appendTexto('ANOTACOES: _____________________________________', 'LEFT', false, 'NORMAL');
   appendTexto('================================================', 'CENTER', false, 'NORMAL');
 
-  escpos += '\n\n\n';
+  // Avanço mínimo para corte preciso sem desperdício de folha branca
+  escpos += '\n';
   escpos += COMANDOS.BEEP;
   escpos += COMANDOS.CUT_FULL;
 
