@@ -9,6 +9,13 @@ const redisService = require('./services/redisService');
 const visaoComandosService = require('./services/visaoComandosService');
 const pesagemPixService = require('./services/pesagemPixService');
 const { executarFechamentoExpediente } = require('./services/fechamentoExpedienteService');
+let operacoesHibridasDiogoService = null;
+try {
+  operacoesHibridasDiogoService = require('./services/operacoesHibridasDiogoService');
+} catch (e) {
+  console.warn('[app] operacoesHibridasDiogoService.js indisponível:', e.message);
+}
+
 
 let db = null;
 try {
@@ -622,7 +629,19 @@ async function executarTurnoConsolidado(chaveCanonica) {
   }
 }
 
-async function tratarComandoOperacional(texto, destinoEnvio) {
+async function tratarComandoOperacional(texto, destinoEnvio, normalizado = null, chaveCanonica = '', telefoneReal = '') {
+  if (operacoesHibridasDiogoService && typeof operacoesHibridasDiogoService.processarComandoDiogo === 'function') {
+    const tratadoDiogo = await operacoesHibridasDiogoService.processarComandoDiogo({
+      texto,
+      destinoEnvio,
+      remetenteTelefone: telefoneReal || chaveCanonica,
+      isImage: normalizado?.isImage || false,
+      base64Image: normalizado?.base64Image || null,
+      fromMe: normalizado?.fromMe || false
+    });
+    if (tratadoDiogo) return true;
+  }
+
   const lower = texto.toLowerCase().trim();
 
   if (lower.startsWith('#falta ') || lower.startsWith('#esgotado ')) {
@@ -716,7 +735,7 @@ app.post(['/webhook', '/webhook/whatsapp', '/api/webhook'], async (req, res) => 
         return;
       }
 
-      const okCmd = await tratarComandoOperacional(textoRecebido, destinoEnvio);
+      const okCmd = await tratarComandoOperacional(textoRecebido, destinoEnvio, normalizado, chaveCanonica, telefoneReal);
       if (okCmd) return;
     }
 
