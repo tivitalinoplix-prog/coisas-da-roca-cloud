@@ -512,7 +512,45 @@ async function obterTelefonePorLid(lidKey) {
   return memLidMap.get(key) || null;
 }
 
+
+let memPausaGlobal = true; // Padrão de segurança: inicia pausado até liberação explícita
+
+async function definirPausaGlobal(pausado) {
+  memPausaGlobal = Boolean(pausado);
+  const valor = memPausaGlobal ? '1' : '0';
+  if (isRedisConectado()) {
+    try {
+      await redisClient.set('config:automacao_pausada_global', valor);
+    } catch (err) {
+      console.warn('[Redis] Erro ao salvar pausa global:', err.message);
+    }
+  }
+  return memPausaGlobal;
+}
+
+async function obterPausaGlobal() {
+  if (process.env.AUTOMACOES_PAUSADAS === 'true') return true;
+  if (isRedisConectado()) {
+    try {
+      const val = await redisClient.get('config:automacao_pausada_global');
+      if (val === '0') {
+        memPausaGlobal = false;
+        return false;
+      }
+      if (val === '1') {
+        memPausaGlobal = true;
+        return true;
+      }
+    } catch (err) {
+      console.warn('[Redis] Erro ao ler pausa global:', err.message);
+    }
+  }
+  return memPausaGlobal;
+}
+
 module.exports = {
+  definirPausaGlobal,
+  obterPausaGlobal,
   isRedisConectado,
   criarSessaoVazia,
   adquirirLock,

@@ -175,11 +175,33 @@ function autenticarWorkerInterno(req, res, next) {
 const mensagensEnviadasPeloBot = new Set();
 const timersDebounceLocais = new Map();
 
-let pausaGlobalMemoria = process.env.AUTOMACOES_PAUSADAS === 'true';
+let pausaGlobalMemoria = true; // TRAVA FORTE: inicia sempre pausado até reativação explícita
 
 function isAutomacaoPausadaGlobal() {
   return pausaGlobalMemoria || process.env.AUTOMACOES_PAUSADAS === 'true';
 }
+
+// Sincroniza trava global com o Redis ao iniciar
+setTimeout(async () => {
+  try {
+    if (redisService && typeof redisService.obterPausaGlobal === 'function') {
+      const pausadoRedis = await redisService.obterPausaGlobal();
+      pausaGlobalMemoria = pausadoRedis;
+      console.log(`[app] 🔒 Trava Global sincronizada com Redis: ${pausaGlobalMemoria ? 'PAUSADA' : 'ATIVA'}`);
+    }
+  } catch (_) {}
+}, 3000);
+
+// Sincroniza trava global com o Redis ao iniciar
+setTimeout(async () => {
+  try {
+    if (redisService && typeof redisService.obterPausaGlobal === 'function') {
+      const pausadoRedis = await redisService.obterPausaGlobal();
+      pausaGlobalMemoria = pausadoRedis;
+      console.log(`[app] 🔒 Trava Global sincronizada com Redis: ${pausaGlobalMemoria ? 'PAUSADA' : 'ATIVA'}`);
+    }
+  } catch (_) {}
+}, 3000);
 
 const TEMPO_DEBOUNCE_MS = Number(process.env.DEBOUNCE_MS || 7000);
 const TEMPO_PAUSA_HUMANA_SEG = Number(process.env.PAUSA_HUMANA_MINUTOS || 30) * 60;
@@ -1172,14 +1194,16 @@ app.get('/api/automacao/status', (req, res) => {
   });
 });
 
-app.post('/api/automacao/pausar', autenticarWorkerInterno, (req, res) => {
+app.post('/api/automacao/pausar', autenticarWorkerInterno, async (req, res) => {
   pausaGlobalMemoria = true;
+  if (redisService.definirPausaGlobal) await redisService.definirPausaGlobal(true);
   console.log('⏸️ [app] Automação PAUSADA GLOBALMENTE via endpoint /api/automacao/pausar');
   res.json({ ok: true, pausado: true, mensagem: 'Automação de atendimento pausada globalmente.' });
 });
 
-app.post('/api/automacao/ativar', autenticarWorkerInterno, (req, res) => {
+app.post('/api/automacao/ativar', autenticarWorkerInterno, async (req, res) => {
   pausaGlobalMemoria = false;
+  if (redisService.definirPausaGlobal) await redisService.definirPausaGlobal(false);
   console.log('▶️ [app] Automação ATIVADA GLOBALMENTE via endpoint /api/automacao/ativar');
   res.json({ ok: true, pausado: false, mensagem: 'Automação de atendimento ativada com sucesso.' });
 });

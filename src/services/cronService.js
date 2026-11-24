@@ -1,6 +1,7 @@
 const cron = require('node-cron');
 const { executarCampanhaCoorte } = require('./disparoHumanizadoService');
 const { executarFechamentoExpediente } = require('./fechamentoExpedienteService');
+const redisService = require('./redisService');
 
 function iniciarRotinasAgendadas() {
   // 1. Coorte Reativação D+15: Terça e Quinta às 09:30
@@ -8,7 +9,8 @@ function iniciarRotinasAgendadas() {
     const templateReativacao = `{Bom dia|Olá|Oi, tudo bem?}, {nome}! {Aqui é a equipe do Açougue e Mercearia Coisas da Roça|Aqui é do Coisas da Roça|Aqui é a Jussara do balcão do Coisas da Roça}. {Notamos que já faz uns dias que você não passa por aqui|Sentimos sua falta por aqui no balcão|Passando para saber como você e a família estão}! {Hoje recebemos cortes fresquinhos de primeira, moída bem magrinha e produtos artesanais da roça|Chegaram carnes selecionadas fresquinhas e queijos da roça|Temos cortes especiais fresquinhos prontos para o almoço}. Se quiser que a gente separe algo para entrega na sua casa ou retirada, é só mandar uma mensagem ou áudio por aqui! 🥩👍`;
 
     try {
-      await executarCampanhaCoorte({
+      if (await redisService.obterPausaGlobal()) { console.log('[CRON] ⏸️ Automação pausada globalmente. Disparo cancelado.'); return; }
+    await executarCampanhaCoorte({
         tipoCoorte: 'REATIVACAO_D15',
         templateSpintax: templateReativacao,
         limiteDisparos: 250,
@@ -23,7 +25,8 @@ function iniciarRotinasAgendadas() {
     const templateChurrasco = `{Olá|Oi|Bom dia}, {nome}! {Sextou com muita carne boa no Coisas da Roça!|O fim de semana chegou no Coisas da Roça!|Preparando o churrasco do fim de semana?} 🥩 {Chegaram cortes nobres de Contra Filé Chorizo, Picanha bovina e Alcatra com maminha|Recebemos picanha fresquinha, linguiças artesanais e queijo coalho de primeira|Temos carvão especial, queijos da roça e cortes nobres fresquinhos}. Quer que a gente já adiante o seu pedido para entrega hoje aí na sua casa? É só mandar mensagem ou áudio que já organizamos tudo no balcão! 👍`;
 
     try {
-      await executarCampanhaCoorte({
+      if (await redisService.obterPausaGlobal()) { console.log('[CRON] ⏸️ Automação pausada globalmente. Disparo cancelado.'); return; }
+    await executarCampanhaCoorte({
         tipoCoorte: 'CHURRASCO_SEXTA',
         templateSpintax: templateChurrasco,
         limiteDisparos: 350,
@@ -38,7 +41,8 @@ function iniciarRotinasAgendadas() {
     const templateAgua = `{Bom dia|Olá|Oi}, {nome}! {Passando para lembrar da água mineral para o fim de semana!|Já conferiu como está o galão de água em casa?|Aqui é do Coisas da Roça com água mineral fresquinha!} {Temos refil de 20L para troca: Areia Branca R$ 13,00 e Serra do Segredo R$ 13,50|Galões de 20L prontos para entrega imediata em Macaé}. Se precisar repor o galão para o fim de semana, é só avisar por aqui que o motoboy já leva aí para você! 🛵`;
 
     try {
-      await executarCampanhaCoorte({
+      if (await redisService.obterPausaGlobal()) { console.log('[CRON] ⏸️ Automação pausada globalmente. Disparo cancelado.'); return; }
+    await executarCampanhaCoorte({
         tipoCoorte: 'AGUA_20L',
         templateSpintax: templateAgua,
         limiteDisparos: 250,
